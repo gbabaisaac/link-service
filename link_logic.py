@@ -19,7 +19,7 @@ def llm_json(prompt: str, temperature: float = 0.0) -> dict:
         genai.configure(api_key=settings.GOOGLE_API_KEY)
         # Request JSON output
         model = genai.GenerativeModel(
-            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
             generation_config={"response_mime_type": "application/json", "temperature": temperature},
         )
         resp = model.generate_content(prompt)
