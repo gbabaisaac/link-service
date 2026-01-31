@@ -25,13 +25,28 @@ def get_profiles(university_id: Optional[str] = None, limit: int = 500) -> list[
     query = client.table("profiles").select("*")
     if university_id:
         query = query.eq("university_id", university_id)
+    # Only include visible, non-Link profiles
+    query = (
+        query
+        .neq("is_link", True)
+        .in_("friends_visibility", ["school", "public"])
+        .eq("yearbook_visible", True)
+    )
     return query.limit(limit).execute().data
 
 
-def get_profile(user_id: str) -> Optional[dict]:
+def get_profile(user_id: str, enforce_public: bool = True) -> Optional[dict]:
     """Fetch a single profile by user ID."""
     client = get_supabase_client()
-    result = client.table("profiles").select("*").eq("id", user_id).execute()
+    query = client.table("profiles").select("*").eq("id", user_id)
+    if enforce_public:
+        query = (
+            query
+            .neq("is_link", True)
+            .in_("friends_visibility", ["school", "public"])
+            .eq("yearbook_visible", True)
+        )
+    result = query.execute()
     return result.data[0] if result.data else None
 
 
@@ -40,10 +55,23 @@ def get_profile(user_id: str) -> Optional[dict]:
 def get_organizations(university_id: Optional[str] = None, limit: int = 200) -> list[dict]:
     """Fetch organizations, optionally filtered by university."""
     client = get_supabase_client()
-    query = client.table("organizations").select("*")
+    query = client.table("organizations").select("*").eq("is_public", True)
     if university_id:
         query = query.eq("university_id", university_id)
     return query.limit(limit).execute().data
+
+
+def get_organization(org_id: str) -> Optional[dict]:
+    """Fetch a single public organization."""
+    client = get_supabase_client()
+    result = (
+        client.table("organizations")
+        .select("*")
+        .eq("id", org_id)
+        .eq("is_public", True)
+        .execute()
+    )
+    return result.data[0] if result.data else None
 
 
 # ============ Event Functions ============
@@ -51,10 +79,58 @@ def get_organizations(university_id: Optional[str] = None, limit: int = 200) -> 
 def get_upcoming_events(university_id: Optional[str] = None, limit: int = 100) -> list[dict]:
     """Fetch upcoming events."""
     client = get_supabase_client()
-    query = client.table("events").select("*").gte("start_at", "now()")
+    query = (
+        client.table("events")
+        .select("*")
+        .gte("start_at", "now()")
+        .in_("visibility", ["public", "school"])
+    )
     if university_id:
         query = query.eq("university_id", university_id)
     return query.order("start_at").limit(limit).execute().data
+
+
+def get_event(event_id: str) -> Optional[dict]:
+    """Fetch a single event if it is broadly visible."""
+    client = get_supabase_client()
+    result = (
+        client.table("events")
+        .select("*")
+        .eq("id", event_id)
+        .in_("visibility", ["public", "school"])
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+# ============ Post Functions ============
+
+def get_posts(university_id: Optional[str] = None, limit: int = 200) -> list[dict]:
+    """Fetch posts from public forums."""
+    client = get_supabase_client()
+    query = (
+        client.table("posts")
+        .select("*, forums!inner(id, name, is_public, university_id)")
+        .eq("forums.is_public", True)
+        .is_("deleted_at", "null")
+    )
+    if university_id:
+        query = query.eq("forums.university_id", university_id)
+    return query.order("created_at", desc=True).limit(limit).execute().data
+
+
+def get_post(post_id: str) -> Optional[dict]:
+    """Fetch a single post from a public forum."""
+    client = get_supabase_client()
+    result = (
+        client.table("posts")
+        .select("*, forums!inner(id, name, is_public, university_id)")
+        .eq("id", post_id)
+        .eq("forums.is_public", True)
+        .is_("deleted_at", "null")
+        .execute()
+    )
+    return result.data[0] if result.data else None
 
 
 # ============ Link Facts Functions ============

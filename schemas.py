@@ -114,6 +114,7 @@ class QueryResponse(BaseModel):
     intent: Intent
     response: ResponseContent
     results: list[ResultItem] = []
+    data: Optional[dict] = None
     need_outreach: bool = False
     outreach_request_id: Optional[str] = None
     validation: ValidationInfo

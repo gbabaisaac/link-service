@@ -218,6 +218,45 @@ Respond in JSON:
         )
 
 
+def build_results_payload(results: list[dict]) -> Optional[dict]:
+    """Fetch full records for results so clients can render cards."""
+    items: list[dict] = []
+    types: set[str] = set()
+
+    for result in results:
+        r_type = result.get("type")
+        record = None
+        if r_type == "profile":
+            record = db.get_profile(result.get("id", ""), enforce_public=True)
+        elif r_type == "organization":
+            record = db.get_organization(result.get("id", ""))
+        elif r_type == "event":
+            record = db.get_event(result.get("id", ""))
+        elif r_type == "post":
+            record = db.get_post(result.get("id", ""))
+
+        if record:
+            record["type"] = r_type
+            items.append(record)
+            types.add(r_type)
+
+    if not items:
+        return None
+
+    if len(types) == 1:
+        type_map = {
+            "profile": "people",
+            "organization": "orgs",
+            "event": "events",
+            "post": "posts",
+        }
+        payload_type = type_map.get(next(iter(types)), "mixed")
+    else:
+        payload_type = "mixed"
+
+    return {"type": payload_type, "results": items}
+
+
 # ============ Main Query Processing ============
 
 def process_query(
@@ -281,6 +320,7 @@ def process_query(
         "intent": intent,
         "response": response,
         "results": formatted_results,
+        "data": build_results_payload(results),
         "need_outreach": need_outreach,
         "outreach_request_id": None,
         "validation": validation,

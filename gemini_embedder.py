@@ -28,6 +28,19 @@ class GeminiEmbedder(BaseEmbedding):
     def get_text_embedding(self, text: str) -> List[float]:
         return self._embed_one(text)
 
+    # LlamaIndex abstract methods (sync + async)
+    def _get_query_embedding(self, query: str) -> List[float]:
+        return self._embed_one(query)
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        return self._embed_one(text)
+
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        return self._embed_one(query)
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        return self._embed_one(text)
+
     def _embed_one(self, text: str) -> List[float]:
         try:
             r = genai.embed_content(model=self.model_name, content=text)

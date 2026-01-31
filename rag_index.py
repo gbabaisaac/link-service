@@ -142,6 +142,29 @@ Confidence: {fact.get('confidence_score', 0)}
     )
 
 
+def create_post_document(post: dict) -> Document:
+    """Convert forum post to searchable document."""
+    forum = post.get("forums") or {}
+    text = f"""
+Post: {post.get('title', 'Untitled')}
+Forum: {forum.get('name', 'Forum')}
+Body: {post.get('body', '')}
+Tags: {', '.join(post.get('tags') or [])}
+""".strip()
+
+    return Document(
+        text=text,
+        metadata={
+            "type": "post",
+            "id": post.get("id", ""),
+            "forum_id": post.get("forum_id", ""),
+            "forum_name": forum.get("name"),
+            "university_id": forum.get("university_id"),
+            "name": post.get("title", "Post"),
+        },
+    )
+
+
 # ============ Index Management ============
 
 def build_index(university_id: Optional[str] = None) -> dict:
@@ -156,7 +179,7 @@ def build_index(university_id: Optional[str] = None) -> dict:
     _init_llama_settings()
 
     documents = []
-    counts = {"profiles": 0, "organizations": 0, "events": 0, "link_facts": 0}
+    counts = {"profiles": 0, "organizations": 0, "events": 0, "link_facts": 0, "posts": 0}
 
     # Load profiles
     try:
@@ -193,6 +216,15 @@ def build_index(university_id: Optional[str] = None) -> dict:
             counts["link_facts"] += 1
     except Exception as e:
         print(f"Warning: Could not load link_facts: {e}")
+
+    # Load public forum posts
+    try:
+        posts = db.get_posts(university_id)
+        for p in posts:
+            documents.append(create_post_document(p))
+            counts["posts"] += 1
+    except Exception as e:
+        print(f"Warning: Could not load posts: {e}")
 
     # Build the vector index
     if documents:
