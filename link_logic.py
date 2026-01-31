@@ -257,6 +257,54 @@ def build_results_payload(results: list[dict]) -> Optional[dict]:
     return {"type": payload_type, "results": items}
 
 
+def build_card_metadata(item: dict, item_type: str) -> Optional[dict]:
+    """Convert full item into card metadata for the client UI."""
+    if item_type == "profile":
+        return {
+            "shareType": "profile",
+            "user_id": item.get("id"),
+            "full_name": item.get("full_name"),
+            "username": item.get("username"),
+            "avatar_url": item.get("avatar_url"),
+            "major": item.get("major"),
+            "graduation_year": item.get("graduation_year"),
+            "mutual_friends": item.get("mutual_friends"),
+        }
+    if item_type == "event":
+        return {
+            "shareType": "event",
+            "event_id": item.get("id"),
+            "title": item.get("title"),
+            "start_at": item.get("start_at"),
+            "location_name": item.get("location_name"),
+            "image_url": item.get("image_url"),
+            "attendee_count": item.get("attendees_count"),
+        }
+    if item_type == "organization":
+        return {
+            "shareType": "org",
+            "org_id": item.get("id"),
+            "name": item.get("name"),
+            "category": item.get("category"),
+            "logo_url": item.get("logo_url"),
+            "member_count": item.get("member_count"),
+        }
+    if item_type == "post":
+        forum = item.get("forums") or {}
+        return {
+            "shareType": "post",
+            "post_id": item.get("id"),
+            "forum_id": item.get("forum_id"),
+            "title": item.get("title"),
+            "body": item.get("body"),
+            "image_url": (item.get("media_urls") or [None])[0],
+            "forum_name": forum.get("name"),
+            "comments_count": item.get("comments_count"),
+            "upvotes_count": item.get("upvotes_count"),
+        }
+    return None
+
+
 # ============ Main Query Processing ============
 
 def process_query(
@@ -316,11 +364,31 @@ def process_query(
         for r in results[:5]
     ]
 
+    payload_data = build_results_payload(results)
+
+    # Persist Link response + cards into link_messages (best-effort)
+    try:
+        convo = db.get_or_create_link_conversation(user_id)
+        if convo and response and response.message:
+            link_profile = db.get_link_system_profile(university_id)
+            sender_id = link_profile.get("link_user_id") if link_profile else None
+            db.insert_link_message(convo["id"], sender_id, response.message, {"shareType": "text"})
+
+            if payload_data and payload_data.get("results"):
+                for item in payload_data["results"]:
+                    item_type = item.get("type")
+                    metadata = build_card_metadata(item, item_type)
+                    if metadata:
+                        title = item.get("name") or item.get("title") or "Shared item"
+                        db.insert_link_message(convo["id"], sender_id, title, metadata)
+    except Exception:
+        pass
+
     return {
         "intent": intent,
         "response": response,
         "results": formatted_results,
-        "data": build_results_payload(results),
+        "data": payload_data,
         "need_outreach": need_outreach,
         "outreach_request_id": None,
         "validation": validation,

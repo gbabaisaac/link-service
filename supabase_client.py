@@ -50,6 +50,21 @@ def get_profile(user_id: str, enforce_public: bool = True) -> Optional[dict]:
     return result.data[0] if result.data else None
 
 
+def get_link_system_profile(university_id: str) -> Optional[dict]:
+    """Fetch Link system profile for a university."""
+    client = get_supabase_client()
+    result = (
+        client.table("link_system_profile")
+        .select("*")
+        .eq("university_id", university_id)
+        .maybe_single()
+        .execute()
+    )
+    if result.data:
+        return result.data
+    return None
+
+
 # ============ Organization Functions ============
 
 def get_organizations(university_id: Optional[str] = None, limit: int = 200) -> list[dict]:
@@ -130,6 +145,44 @@ def get_post(post_id: str) -> Optional[dict]:
         .is_("deleted_at", "null")
         .execute()
     )
+    return result.data[0] if result.data else None
+
+
+# ============ Link Conversation/Message Functions ============
+
+def get_or_create_link_conversation(user_id: str) -> Optional[dict]:
+    """Get or create a Link conversation for the user via RPC."""
+    client = get_supabase_client()
+    result = client.rpc("get_or_create_link_conversation", {"p_user_id": user_id}).execute()
+    conversation_id = result.data
+    if not conversation_id:
+        return None
+    convo = (
+        client.table("link_conversations")
+        .select("*")
+        .eq("id", conversation_id)
+        .maybe_single()
+        .execute()
+    )
+    return convo.data if convo.data else None
+
+
+def insert_link_message(
+    conversation_id: str,
+    sender_id: Optional[str],
+    content: str,
+    metadata: Optional[dict] = None,
+) -> Optional[dict]:
+    """Insert a Link message into link_messages."""
+    client = get_supabase_client()
+    payload = {
+        "conversation_id": conversation_id,
+        "sender_type": "link",
+        "sender_id": sender_id,
+        "content": content,
+        "metadata": metadata or {},
+    }
+    result = client.table("link_messages").insert(payload).execute()
     return result.data[0] if result.data else None
 
 
