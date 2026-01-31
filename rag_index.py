@@ -28,7 +28,7 @@ def _init_llama_settings():
         os.environ["GOOGLE_API_KEY"] = app_settings.GOOGLE_API_KEY
         from llama_index.llms.gemini import Gemini
         from llama_index.embeddings.gemini import GeminiEmbedding
-        Settings.llm = Gemini(model="gemini-pro", temperature=0)
+        Settings.llm = Gemini(model="gemini-2.0-flash", temperature=0)
         Settings.embed_model = GeminiEmbedding(model_name="text-embedding-004")
     else:
         # OpenAI provider (default)
