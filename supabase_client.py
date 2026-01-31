@@ -76,6 +76,19 @@ def get_organizations(university_id: Optional[str] = None, limit: int = 200) -> 
     return query.limit(limit).execute().data
 
 
+def get_organizations_count(university_id: Optional[str] = None) -> int:
+    """Get total count of organizations."""
+    try:
+        client = get_supabase_client()
+        query = client.table("organizations").select("id", count="exact")
+        if university_id:
+            query = query.eq("university_id", university_id)
+        result = query.execute()
+        return result.count or 0
+    except Exception:
+        return 0
+
+
 def get_organization(org_id: str) -> Optional[dict]:
     """Fetch a single public organization."""
     client = get_supabase_client()
@@ -103,6 +116,19 @@ def get_upcoming_events(university_id: Optional[str] = None, limit: int = 100) -
     if university_id:
         query = query.eq("university_id", university_id)
     return query.order("start_at").limit(limit).execute().data
+
+
+def get_events_count(university_id: Optional[str] = None) -> int:
+    """Get total count of events."""
+    try:
+        client = get_supabase_client()
+        query = client.table("events").select("id", count="exact")
+        if university_id:
+            query = query.eq("university_id", university_id)
+        result = query.execute()
+        return result.count or 0
+    except Exception:
+        return 0
 
 
 def get_event(event_id: str) -> Optional[dict]:
@@ -167,11 +193,40 @@ def get_or_create_link_conversation(user_id: str) -> Optional[dict]:
     return convo.data if convo.data else None
 
 
+def get_or_create_link_session(user_id: str, university_id: Optional[str] = None) -> Optional[dict]:
+    """Get or create an active Link session for the user."""
+    client = get_supabase_client()
+    existing = (
+        client.table("link_user_sessions")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("status", "active")
+        .order("started_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        session = existing.data[0]
+    else:
+        payload = {"user_id": user_id, "status": "active"}
+        if university_id:
+            payload["university_id"] = university_id
+        created = client.table("link_user_sessions").insert(payload).execute()
+        session = created.data[0] if created.data else None
+
+    if session:
+        client.table("link_user_sessions").update({
+            "last_active_at": "now()",
+        }).eq("id", session["id"]).execute()
+    return session
+
+
 def insert_link_message(
     conversation_id: str,
     sender_id: Optional[str],
     content: str,
     metadata: Optional[dict] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Insert a Link message into link_messages."""
     client = get_supabase_client()
@@ -182,8 +237,19 @@ def insert_link_message(
         "content": content,
         "metadata": metadata or {},
     }
+    if session_id:
+        payload["session_id"] = session_id
     result = client.table("link_messages").insert(payload).execute()
     return result.data[0] if result.data else None
+
+
+def set_link_conversation_session(conversation_id: str, session_id: str) -> None:
+    """Attach a Link session to a conversation."""
+    client = get_supabase_client()
+    client.table("link_conversations").update({
+        "session_id": session_id,
+        "updated_at": "now()",
+    }).eq("id", conversation_id).execute()
 
 
 # ============ Link Facts Functions ============
@@ -274,6 +340,27 @@ def update_outreach_request(request_id: str, data: dict) -> dict:
     return client.table("link_outreach_requests").update(data).eq("id", request_id).execute().data[0]
 
 
+def create_outreach_message(message: dict) -> dict:
+    """Create an outreach message record."""
+    client = get_supabase_client()
+    return client.table("link_outreach_messages").insert(message).execute().data[0]
+
+
+def list_outreach_messages(request_id: str, target_user_id: Optional[str] = None) -> list[dict]:
+    """List outreach messages for a request."""
+    client = get_supabase_client()
+    query = client.table("link_outreach_messages").select("*").eq("outreach_request_id", request_id)
+    if target_user_id:
+        query = query.eq("target_user_id", target_user_id)
+    return query.order("created_at").execute().data
+
+
+def update_outreach_message(message_id: str, data: dict) -> dict:
+    """Update an outreach message record."""
+    client = get_supabase_client()
+    return client.table("link_outreach_messages").update(data).eq("id", message_id).execute().data[0]
+
+
 # ============ Connection Functions ============
 
 def create_connection(connection: dict) -> dict:
@@ -291,6 +378,46 @@ def get_friends(user_id: str) -> list[str]:
     result2 = client.table("friendships").select("user1_id").eq("user2_id", user_id).execute()
     friends = [r["user2_id"] for r in result1.data] + [r["user1_id"] for r in result2.data]
     return list(set(friends))
+
+
+def get_profile_by_username(username: str) -> Optional[dict]:
+    """Fetch a profile by username."""
+    client = get_supabase_client()
+    result = client.table("profiles").select("*").eq("username", username).maybe_single().execute()
+    return result.data if result.data else None
+
+
+def get_profiles_by_ids(user_ids: list[str]) -> list[dict]:
+    """Fetch profiles by a list of user IDs."""
+    if not user_ids:
+        return []
+    client = get_supabase_client()
+    return client.table("profiles").select("*").in_("id", user_ids).execute().data
+
+
+def create_conversation(payload: dict) -> dict:
+    """Create a conversation row."""
+    client = get_supabase_client()
+    return client.table("conversations").insert(payload).execute().data[0]
+
+
+def add_conversation_participants(conversation_id: str, user_ids: list[str]) -> list[dict]:
+    """Add participants to a conversation."""
+    client = get_supabase_client()
+    rows = [{"conversation_id": conversation_id, "user_id": uid} for uid in user_ids]
+    return client.table("conversation_participants").insert(rows).execute().data
+
+
+def insert_message(conversation_id: str, sender_id: str, content: str, metadata: Optional[dict] = None) -> dict:
+    """Insert a message into a conversation."""
+    client = get_supabase_client()
+    payload = {
+        "conversation_id": conversation_id,
+        "sender_id": sender_id,
+        "content": content,
+        "metadata": metadata or {},
+    }
+    return client.table("messages").insert(payload).execute().data[0]
 
 
 def get_classmates(user_id: str, semester: Optional[str] = None) -> list[str]:

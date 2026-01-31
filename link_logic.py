@@ -53,10 +53,25 @@ INTENT_PATTERNS = {
     "checkin_response": ["good", "fine", "stressed", "busy", "excited", "tired", "great"],
 }
 
+SMALL_TALK_PATTERNS = [
+    "hi", "hello", "hey", "yo", "sup", "what's up", "whats up", "wyd", "how are you", "how's it going",
+]
+
+
+def _is_small_talk(question: str) -> bool:
+    q = (question or "").strip().lower()
+    if not q:
+        return True
+    if len(q.split()) <= 3 and any(p in q for p in SMALL_TALK_PATTERNS):
+        return True
+    return False
+
 
 def parse_intent(question: str, conversation_history: list[dict] = None) -> Intent:
     """Parse user question into structured intent using LLM or simple patterns in TEST_MODE."""
     if settings.TEST_MODE:
+        if _is_small_talk(question):
+            return Intent(type="small_talk", entities=[], filters={})
         q = question.lower()
         if any(p in q for p in ("looking for", "who plays", "partners", "anyone who")):
             return Intent(type="find_people", entities=[], filters={})
@@ -77,6 +92,7 @@ User message: "{question}"
 {f"Recent conversation: {history_context}" if history_context else ""}
 
 Classify the intent as one of:
+- small_talk: Greetings or casual chat
 - find_people: Looking for people with specific interests/skills
 - find_info: Asking for information about something
 - find_event: Looking for events or activities
@@ -97,14 +113,19 @@ Respond in JSON format:
     result = llm_json(prompt, temperature=0)
 
     try:
-        return Intent(
+        intent = Intent(
             type=result.get("type", "general_question"),
             entities=result.get("entities", []),
             filters=result.get("filters", {}),
         )
+        if _is_small_talk(question):
+            intent.type = "small_talk"
+        return intent
     except (json.JSONDecodeError, KeyError):
         # Fallback to pattern matching
         question_lower = question.lower()
+        if _is_small_talk(question):
+            return Intent(type="small_talk", entities=[], filters={})
         for intent_type, patterns in INTENT_PATTERNS.items():
             if any(p in question_lower for p in patterns):
                 return Intent(type=intent_type, entities=[], filters={})
@@ -193,6 +214,8 @@ Communication style to use: {archetype}
 - If friendly (default): warm, helpful, moderate emoji use
 
 Generate a helpful response. If need_outreach is True, offer to ask around.
+Never mention specific people, posts, events, or organizations unless they appear in the results list.
+If the results list is empty, do not invent names or content - ask a clarifying question instead.
 Keep it concise and natural.
 
 Respond in JSON:
@@ -317,17 +340,70 @@ def process_query(
     # 1. Parse intent
     intent = parse_intent(question, conversation_history)
 
-    # 2. Retrieve relevant documents
-    search_query = question
-    if intent.entities:
-        search_query = f"{question} {' '.join(intent.entities)}"
+    # 2. Handle simple count queries directly
+    q_lower = question.lower()
+    if intent.type in ["find_info", "general_question"]:
+        if any(p in q_lower for p in ["how many org", "number of org", "org count", "organizations on campus"]):
+            count = db.get_organizations_count(university_id)
+            response = ResponseContent(
+                message=f"There are {count} organizations on campus.",
+                tone="friendly",
+                suggestions=[],
+            )
+            validation = ValidationInfo(
+                system_confidence=0.9,
+                agreement_score=1.0,
+                sources_count=0,
+                verified_facts_used=0,
+            )
+            return {
+                "intent": intent,
+                "response": response,
+                "results": [],
+                "need_outreach": False,
+                "outreach_request_id": None,
+                "validation": validation,
+                "sources": [],
+                "memory_updated": False,
+                "journal_entry_created": False,
+            }
+        if any(p in q_lower for p in ["how many event", "number of event", "events on campus"]):
+            count = db.get_events_count(university_id)
+            response = ResponseContent(
+                message=f"There are {count} events on campus.",
+                tone="friendly",
+                suggestions=[],
+            )
+            validation = ValidationInfo(
+                system_confidence=0.9,
+                agreement_score=1.0,
+                sources_count=0,
+                verified_facts_used=0,
+            )
+            return {
+                "intent": intent,
+                "response": response,
+                "results": [],
+                "need_outreach": False,
+                "outreach_request_id": None,
+                "validation": validation,
+                "sources": [],
+                "memory_updated": False,
+                "journal_entry_created": False,
+            }
 
-    results = rag_index.retrieve(search_query, top_k=5, university_id=university_id)
+    # 3. Retrieve relevant documents (skip for general chat)
+    results = []
+    if intent.type in ["find_people", "find_info", "find_event", "find_org"]:
+        search_query = question
+        if intent.entities:
+            search_query = f"{question} {' '.join(intent.entities)}"
+        results = rag_index.retrieve(search_query, top_k=5, university_id=university_id)
 
-    # 3. Separate facts from other results
+    # 4. Separate facts from other results
     facts = [r for r in results if r["type"] == "link_fact"]
 
-    # 4. Calculate confidence
+    # 5. Calculate confidence
     validation = calculate_confidence(results, facts, intent)
 
     # 5. Determine if outreach is needed
@@ -336,17 +412,49 @@ def process_query(
         and intent.type in ["find_people", "find_info"]
     )
 
-    # 6. Get user memory for style
+    # 6. Filter/limit results based on confidence (only for find intents)
+    filtered_results = results
+    min_confidence_to_show = 0.4
+    if intent.type in ["find_people", "find_info", "find_event", "find_org"] and validation.system_confidence < settings.CONFIDENCE_THRESHOLD:
+        verified = [r for r in results if r["type"] == "link_fact"]
+        others = [r for r in results if r["type"] != "link_fact"]
+        ordered = verified + others
+        filtered_results = [r for r in ordered if (r.get("score") or 0) >= min_confidence_to_show]
+        if not filtered_results:
+            filtered_results = ordered[:1]
+        else:
+            filtered_results = filtered_results[:2]
+    if intent.type == "find_people":
+        # Drop unrelated profiles if they don't mention any entity keywords
+        entities = [e.lower() for e in intent.entities if e]
+        if entities:
+            def _matches_entities(item: dict) -> bool:
+                haystack = f"{item.get('name','')} {item.get('text','')}".lower()
+                return any(e in haystack for e in entities)
+            filtered_results = [r for r in filtered_results if _matches_entities(r)]
+        else:
+            filtered_results = []
+        if not filtered_results:
+            need_outreach = True
+
+    if intent.type in ["small_talk", "general_question", "checkin_response"]:
+        filtered_results = []
+        need_outreach = False
+
+    if need_outreach:
+        filtered_results = []
+
+    # 7. Get user memory for style
     user_memory = None
     try:
         user_memory = db.get_user_memory(user_id)
     except Exception:
         pass
 
-    # 7. Generate response
-    response = generate_response(question, intent, results, user_memory, need_outreach)
+    # 8. Generate response
+    response = generate_response(question, intent, filtered_results, user_memory, need_outreach)
 
-    # 8. Format results for API response
+    # 9. Format results for API response
     formatted_results = [
         ResultItem(
             type=r["type"],
@@ -355,16 +463,18 @@ def process_query(
             match_reason=r.get("text", "")[:100],
             confidence=round(r.get("score", 0), 2),
         )
-        for r in results
+        for r in filtered_results
     ]
 
-    # 9. Build sources
+    # 10. Build sources
     sources = [
         SourceItem(type=r["type"], id=r["id"], detail=r["name"])
-        for r in results[:5]
+        for r in filtered_results[:5]
     ]
 
-    payload_data = build_results_payload(results)
+    payload_data = None
+    if not need_outreach and intent.type in ["find_people", "find_info", "find_event", "find_org"]:
+        payload_data = build_results_payload(filtered_results)
 
     # Persist Link response + cards into link_messages (best-effort)
     try:
@@ -372,7 +482,18 @@ def process_query(
         if convo and response and response.message:
             link_profile = db.get_link_system_profile(university_id)
             sender_id = link_profile.get("link_user_id") if link_profile else None
-            db.insert_link_message(convo["id"], sender_id, response.message, {"shareType": "text"})
+            session = db.get_or_create_link_session(user_id, university_id)
+
+            if session:
+                db.set_link_conversation_session(convo["id"], session["id"])
+
+            db.insert_link_message(
+                convo["id"],
+                sender_id,
+                response.message,
+                {"shareType": "text"},
+                session_id=session["id"] if session else None,
+            )
 
             if payload_data and payload_data.get("results"):
                 for item in payload_data["results"]:
@@ -380,7 +501,13 @@ def process_query(
                     metadata = build_card_metadata(item, item_type)
                     if metadata:
                         title = item.get("name") or item.get("title") or "Shared item"
-                        db.insert_link_message(convo["id"], sender_id, title, metadata)
+                        db.insert_link_message(
+                            convo["id"],
+                            sender_id,
+                            title,
+                            metadata,
+                            session_id=session["id"] if session else None,
+                        )
     except Exception:
         pass
 

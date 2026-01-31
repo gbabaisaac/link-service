@@ -12,21 +12,13 @@ from llama_index.core.embeddings import BaseEmbedding
 
 
 class GeminiEmbedder(BaseEmbedding):
-    def __init__(self, model_name: str = "text-embedding-004", api_key: str | None = None):
-        key = api_key or os.getenv("GOOGLE_API_KEY", "")
+    model_name: str = "text-embedding-004"
+    api_key: str | None = None
+
+    def model_post_init(self, __context) -> None:
+        key = self.api_key or os.getenv("GOOGLE_API_KEY", "")
         if key:
             genai.configure(api_key=key)
-        self.model_name = model_name
-
-    def get_query_embedding(self, query: str) -> List[float]:
-        return self._embed_one(query)
-
-    def get_text_embedding_batch(self, texts: List[str]) -> List[List[float]]:
-        return [self._embed_one(t) for t in texts]
-
-    # Optional convenience for some LlamaIndex versions
-    def get_text_embedding(self, text: str) -> List[float]:
-        return self._embed_one(text)
 
     # LlamaIndex abstract methods (sync + async)
     def _get_query_embedding(self, query: str) -> List[float]:
@@ -34,6 +26,9 @@ class GeminiEmbedder(BaseEmbedding):
 
     def _get_text_embedding(self, text: str) -> List[float]:
         return self._embed_one(text)
+
+    def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        return [self._embed_one(t) for t in texts]
 
     async def _aget_query_embedding(self, query: str) -> List[float]:
         return self._embed_one(query)

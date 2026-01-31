@@ -27,6 +27,20 @@ class OutreachProcessRequest(BaseModel):
     outreach_request_id: str
 
 
+class OutreachRequesterConsentRequest(BaseModel):
+    """Requester decision on a candidate."""
+    outreach_request_id: str
+    candidate_user_id: str
+    decision: str  # yes | no | show_other | ask_more
+
+
+class OutreachReplyRequest(BaseModel):
+    """Inbound reply from a target user."""
+    outreach_request_id: str
+    responder_user_id: str
+    response_text: str
+
+
 class ConnectRequest(BaseModel):
     """Request body for /connect endpoint."""
     requesting_user_id: str
@@ -151,7 +165,9 @@ class OutreachMatch(BaseModel):
     """Match found from outreach."""
     user_id: str
     name: str
-    consent: bool
+    consent: bool = False
+    confidence: float = 0.0
+    evidence: list[str] = []
 
 
 class OutreachProcessResponse(BaseModel):
@@ -162,6 +178,15 @@ class OutreachProcessResponse(BaseModel):
     facts_created: int
     matches_found: list[OutreachMatch] = []
     updated_confidence: float
+    profile_card: Optional[dict] = None
+    next_actions: list[str] = []
+
+
+class OutreachConsentResponse(BaseModel):
+    """Response from requester consent action."""
+    status: str
+    action: str
+    message: str = ""
 
 
 class ConnectResponse(BaseModel):

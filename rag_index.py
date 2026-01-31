@@ -27,7 +27,7 @@ def _use_test_mode() -> bool:
 def _init_llama_settings():
     """Initialize LlamaIndex settings with selected provider."""
     if app_settings.LLM_PROVIDER == "gemini":
-        # Gemini provider (custom minimal embedder to avoid extra deps)
+        # Gemini provider (custom embedder to avoid package version mismatch)
         os.environ["GOOGLE_API_KEY"] = app_settings.GOOGLE_API_KEY
         from gemini_embedder import GeminiEmbedder
         Settings.embed_model = GeminiEmbedder(model_name="text-embedding-004")
