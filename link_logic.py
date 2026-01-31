@@ -93,7 +93,7 @@ def extract_preferences(question: str) -> list[str]:
         r"i like ([^\\.,!?]+)",
         r"i love ([^\\.,!?]+)",
         r"i enjoy ([^\\.,!?]+)",
-        r\"i'm into ([^\\.,!?]+)\",
+        r"i'm into ([^\\.,!?]+)",
     ]
     prefs: list[str] = []
     for pattern in patterns:
