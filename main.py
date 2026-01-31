@@ -1,6 +1,7 @@
 """Link AI - FastAPI Application."""
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 
 from config import settings
@@ -27,6 +28,15 @@ app = FastAPI(
     title="Link AI",
     description="Intelligent AI agent for campus communities",
     version="1.0.0",
+)
+
+# CORS (dev-friendly; tighten in prod)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

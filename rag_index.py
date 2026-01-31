@@ -4,8 +4,6 @@ import os
 from typing import Optional
 
 from llama_index.core import Document, VectorStoreIndex, Settings
-from llama_index.embeddings.openai import OpenAIEmbedding
-from llama_index.llms.openai import OpenAI
 
 from config import settings as app_settings
 import supabase_client as db
@@ -18,18 +16,22 @@ _is_indexed: bool = False
 
 def _use_test_mode() -> bool:
     # Read env directly to avoid stale settings during server import
-    return os.getenv("TEST_MODE", "false").lower() == "true" or not bool(os.getenv("OPENAI_API_KEY", ""))
+    provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    if os.getenv("TEST_MODE", "false").lower() == "true":
+        return True
+    if provider == "gemini":
+        return not bool(os.getenv("GOOGLE_API_KEY", ""))
+    return not bool(os.getenv("OPENAI_API_KEY", ""))
 
 
 def _init_llama_settings():
     """Initialize LlamaIndex settings with selected provider."""
     if app_settings.LLM_PROVIDER == "gemini":
-        # Gemini provider
+        # Gemini provider (custom minimal embedder to avoid extra deps)
         os.environ["GOOGLE_API_KEY"] = app_settings.GOOGLE_API_KEY
-        from llama_index.llms.gemini import Gemini
-        from llama_index.embeddings.gemini import GeminiEmbedding
-        Settings.llm = Gemini(model="gemini-2.0-flash", temperature=0)
-        Settings.embed_model = GeminiEmbedding(model_name="text-embedding-004")
+        from gemini_embedder import GeminiEmbedder
+        Settings.embed_model = GeminiEmbedder(model_name="text-embedding-004")
+        # LLM not required for retrieval/indexing; link_logic handles LLM calls.
     else:
         # OpenAI provider (default)
         os.environ["OPENAI_API_KEY"] = app_settings.OPENAI_API_KEY
