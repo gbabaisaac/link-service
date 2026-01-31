@@ -1,6 +1,7 @@
 """Supabase client and data access functions for Link AI."""
 
 from typing import Optional
+from datetime import datetime, timezone
 from supabase import create_client, Client
 from config import settings
 
@@ -216,9 +217,23 @@ def get_or_create_link_session(user_id: str, university_id: Optional[str] = None
 
     if session:
         client.table("link_user_sessions").update({
-            "last_active_at": "now()",
+            "last_active_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", session["id"]).execute()
     return session
+
+
+def get_link_session_for_user(session_id: str, user_id: str) -> Optional[dict]:
+    """Fetch a Link session and ensure it belongs to the user."""
+    client = get_supabase_client()
+    result = (
+        client.table("link_user_sessions")
+        .select("*")
+        .eq("id", session_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    return result.data if result.data else None
 
 
 def insert_link_message(
@@ -248,7 +263,7 @@ def set_link_conversation_session(conversation_id: str, session_id: str) -> None
     client = get_supabase_client()
     client.table("link_conversations").update({
         "session_id": session_id,
-        "updated_at": "now()",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", conversation_id).execute()
 
 
@@ -263,6 +278,20 @@ def get_link_facts(university_id: Optional[str] = None, consent_only: bool = Tru
     if university_id:
         query = query.eq("university_id", university_id)
     return query.execute().data
+
+
+def get_link_facts_by_value(university_id: str, fact_value: str) -> list[dict]:
+    """Fetch opt-in Link facts matching a fact_value."""
+    client = get_supabase_client()
+    return (
+        client.table("link_facts")
+        .select("*")
+        .eq("university_id", university_id)
+        .eq("consent_status", "opt_in")
+        .ilike("fact_value", fact_value)
+        .execute()
+        .data
+    )
 
 
 def get_facts_count() -> int:

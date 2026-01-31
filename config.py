@@ -23,12 +23,13 @@ class Settings:
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
 
     # Link Config
-    CONFIDENCE_THRESHOLD: float = float(os.getenv("LINK_CONFIDENCE_THRESHOLD", "0.6"))
+    CONFIDENCE_THRESHOLD: float = float(os.getenv("LINK_CONFIDENCE_THRESHOLD", "0.75"))
     OUTREACH_BATCH_SIZE: int = int(os.getenv("LINK_OUTREACH_BATCH_SIZE", "5"))
     OUTREACH_WAIT_MINUTES: int = int(os.getenv("LINK_OUTREACH_WAIT_MINUTES", "12"))
     MAX_OUTREACH_BATCHES: int = int(os.getenv("LINK_MAX_OUTREACH_BATCHES", "3"))
     OUTREACH_HARD_CAP: int = int(os.getenv("LINK_OUTREACH_HARD_CAP", "25"))
     OUTREACH_CONFIDENCE_THRESHOLD: float = float(os.getenv("LINK_OUTREACH_CONFIDENCE_THRESHOLD", "0.75"))
+    REINDEX_ON_START: bool = os.getenv("LINK_REINDEX_ON_START", "false").lower() == "true"
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
 
     # Admin

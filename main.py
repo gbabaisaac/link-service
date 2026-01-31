@@ -35,6 +35,16 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
+@app.on_event("startup")
+async def startup_tasks():
+    """Optional startup tasks."""
+    if settings.REINDEX_ON_START:
+        try:
+            rag_index.build_index()
+        except Exception:
+            pass
+
 # CORS (dev-friendly; tighten in prod)
 app.add_middleware(
     CORSMiddleware,
@@ -84,6 +94,7 @@ async def query(request: QueryRequest):
             university_id=request.university_id,
             question=request.question,
             conversation_history=request.conversation_history,
+            session_id=request.session_id,
         )
         if result.get("need_outreach") and not result.get("outreach_request_id"):
             intent = result.get("intent")

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from config import settings
-from link_logic import llm_json
+from link_logic import llm_json, normalize_entities
 import supabase_client as db
 
 
@@ -18,15 +18,6 @@ class CandidateScore:
     evidence: list[str]
     support_count: int
     consent: bool
-
-
-def _normalize_entities(entities: list[str]) -> list[str]:
-    cleaned: list[str] = []
-    for e in entities or []:
-        e = (e or "").strip().lower()
-        if e and e not in cleaned:
-            cleaned.append(e)
-    return cleaned
 
 
 def build_message_template(question: str, entities: list[str]) -> str:
@@ -109,7 +100,7 @@ def select_outreach_targets(
 ) -> list[dict]:
     """Select a prioritized batch of recipients."""
     excluded = set(excluded_ids + [requester_id])
-    entities = _normalize_entities(entities)
+    entities = normalize_entities(entities)
 
     targets: list[dict] = []
 
@@ -129,7 +120,15 @@ def select_outreach_targets(
         if len(targets) >= batch_size:
             return targets[:batch_size]
 
-    # 3) Interest match
+    # 3) Prior opt-in facts from Link knowledge
+    for entity in entities:
+        facts = db.get_link_facts_by_value(university_id, f"%{entity}%")
+        for fact in facts:
+            _add(fact.get("entity_id"), "link_fact")
+            if len(targets) >= batch_size:
+                return targets[:batch_size]
+
+    # 4) Interest match
     profiles = db.get_profiles(university_id, limit=200)
     if entities:
         for p in profiles:
@@ -146,7 +145,7 @@ def select_outreach_targets(
                 if len(targets) >= batch_size:
                     return targets[:batch_size]
 
-    # 4) Fallback: active profiles
+    # 5) Fallback: active profiles
     for p in profiles:
         _add(p.get("id"), "campus_active")
         if len(targets) >= batch_size:
@@ -171,8 +170,17 @@ def send_outreach_messages(
         convo = db.get_or_create_link_conversation(user_id)
         if not convo:
             continue
+        session = db.get_or_create_link_session(user_id, university_id)
+        if session:
+            db.set_link_conversation_session(convo["id"], session["id"])
         message_text = message_template
-        message = db.insert_link_message(convo["id"], sender_id, message_text, {"shareType": "text"})
+        message = db.insert_link_message(
+            convo["id"],
+            sender_id,
+            message_text,
+            {"shareType": "text"},
+            session_id=session["id"] if session else None,
+        )
         outreach_msg = db.create_outreach_message(
             {
                 "outreach_request_id": outreach_request_id,

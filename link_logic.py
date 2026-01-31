@@ -57,6 +57,25 @@ SMALL_TALK_PATTERNS = [
     "hi", "hello", "hey", "yo", "sup", "what's up", "whats up", "wyd", "how are you", "how's it going",
 ]
 
+ENTITY_SYNONYMS = {
+    "cs": ["computer science", "comp sci", "comp-sci", "compsci", "computer-science", "computerscience"],
+}
+
+
+def normalize_entities(entities: list[str]) -> list[str]:
+    """Expand entities with lightweight synonyms."""
+    normalized: list[str] = []
+    for e in entities or []:
+        e = (e or "").strip().lower()
+        if not e:
+            continue
+        if e not in normalized:
+            normalized.append(e)
+        for syn in ENTITY_SYNONYMS.get(e, []):
+            if syn not in normalized:
+                normalized.append(syn)
+    return normalized
+
 
 def _is_small_talk(question: str) -> bool:
     q = (question or "").strip().lower()
@@ -67,6 +86,25 @@ def _is_small_talk(question: str) -> bool:
     return False
 
 
+def extract_preferences(question: str) -> list[str]:
+    """Extract simple preference phrases from user messages."""
+    text = (question or "").lower()
+    patterns = [
+        r"i like ([^\\.,!?]+)",
+        r"i love ([^\\.,!?]+)",
+        r"i enjoy ([^\\.,!?]+)",
+        r\"i'm into ([^\\.,!?]+)\",
+    ]
+    prefs: list[str] = []
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            pref = match.group(1).strip()
+            if pref and pref not in prefs:
+                prefs.append(pref)
+    return prefs
+
+
 def parse_intent(question: str, conversation_history: list[dict] = None) -> Intent:
     """Parse user question into structured intent using LLM or simple patterns in TEST_MODE."""
     if settings.TEST_MODE:
@@ -74,9 +112,9 @@ def parse_intent(question: str, conversation_history: list[dict] = None) -> Inte
             return Intent(type="small_talk", entities=[], filters={})
         q = question.lower()
         if any(p in q for p in ("looking for", "who plays", "partners", "anyone who")):
-            return Intent(type="find_people", entities=[], filters={})
+            return Intent(type="find_people", entities=normalize_entities([]), filters={})
         if any(p in q for p in ("where", "what time", "how do i")):
-            return Intent(type="find_info", entities=[], filters={})
+            return Intent(type="find_info", entities=normalize_entities([]), filters={})
         return Intent(type="general_question", entities=[], filters={})
 
     # Build context from conversation history
@@ -115,7 +153,7 @@ Respond in JSON format:
     try:
         intent = Intent(
             type=result.get("type", "general_question"),
-            entities=result.get("entities", []),
+            entities=normalize_entities(result.get("entities", [])),
             filters=result.get("filters", {}),
         )
         if _is_small_talk(question):
@@ -128,7 +166,7 @@ Respond in JSON format:
             return Intent(type="small_talk", entities=[], filters={})
         for intent_type, patterns in INTENT_PATTERNS.items():
             if any(p in question_lower for p in patterns):
-                return Intent(type=intent_type, entities=[], filters={})
+                return Intent(type=intent_type, entities=normalize_entities([]), filters={})
         return Intent(type="general_question", entities=[], filters={})
 
 
@@ -173,6 +211,18 @@ def generate_response(
     need_outreach: bool = False,
 ) -> ResponseContent:
     """Generate Link's friendly response."""
+    if intent.type == "small_talk":
+        return ResponseContent(
+            message="hey! what's up? want help finding people, events, or info on campus?",
+            tone="friendly",
+            suggestions=["Find clubs", "Find events", "Meet people"],
+        )
+    if intent.type == "general_question" and not results and not need_outreach:
+        return ResponseContent(
+            message="got it - what do you want to find on campus?",
+            tone="friendly",
+            suggestions=["Clubs", "Events", "People"],
+        )
     if settings.TEST_MODE:
         # Simple offline response for testing
         msg = ""
@@ -216,6 +266,7 @@ Communication style to use: {archetype}
 Generate a helpful response. If need_outreach is True, offer to ask around.
 Never mention specific people, posts, events, or organizations unless they appear in the results list.
 If the results list is empty, do not invent names or content - ask a clarifying question instead.
+If the intent is find_org, only talk about organizations (no forums/posts).
 Keep it concise and natural.
 
 Respond in JSON:
@@ -335,6 +386,7 @@ def process_query(
     university_id: str,
     question: str,
     conversation_history: list[dict] = None,
+    session_id: Optional[str] = None,
 ) -> dict:
     """Main query processing pipeline."""
     # 1. Parse intent
@@ -397,24 +449,32 @@ def process_query(
     if intent.type in ["find_people", "find_info", "find_event", "find_org"]:
         search_query = question
         if intent.entities:
-            search_query = f"{question} {' '.join(intent.entities)}"
+            search_query = f"{question} {' '.join(normalize_entities(intent.entities))}"
         results = rag_index.retrieve(search_query, top_k=5, university_id=university_id)
 
-    # 4. Separate facts from other results
+    # 4. Type-gate results based on intent
+    if intent.type == "find_org":
+        results = [r for r in results if r["type"] in ["organization", "link_fact"]]
+    elif intent.type == "find_people":
+        results = [r for r in results if r["type"] in ["profile", "link_fact"]]
+    elif intent.type == "find_event":
+        results = [r for r in results if r["type"] in ["event", "link_fact"]]
+
+    # 5. Separate facts from other results
     facts = [r for r in results if r["type"] == "link_fact"]
 
-    # 5. Calculate confidence
+    # 6. Calculate confidence
     validation = calculate_confidence(results, facts, intent)
 
-    # 5. Determine if outreach is needed
+    # 7. Determine if outreach is needed
     need_outreach = (
         validation.system_confidence < settings.CONFIDENCE_THRESHOLD
-        and intent.type in ["find_people", "find_info"]
+        and intent.type in ["find_people", "find_info", "find_org"]
     )
 
-    # 6. Filter/limit results based on confidence (only for find intents)
+    # 8. Filter/limit results based on confidence (only for find intents)
     filtered_results = results
-    min_confidence_to_show = 0.4
+    min_confidence_to_show = 0.6
     if intent.type in ["find_people", "find_info", "find_event", "find_org"] and validation.system_confidence < settings.CONFIDENCE_THRESHOLD:
         verified = [r for r in results if r["type"] == "link_fact"]
         others = [r for r in results if r["type"] != "link_fact"]
@@ -426,7 +486,7 @@ def process_query(
             filtered_results = filtered_results[:2]
     if intent.type == "find_people":
         # Drop unrelated profiles if they don't mention any entity keywords
-        entities = [e.lower() for e in intent.entities if e]
+        entities = normalize_entities(intent.entities)
         if entities:
             def _matches_entities(item: dict) -> bool:
                 haystack = f"{item.get('name','')} {item.get('text','')}".lower()
@@ -434,6 +494,16 @@ def process_query(
             filtered_results = [r for r in filtered_results if _matches_entities(r)]
         else:
             filtered_results = []
+        if not filtered_results:
+            need_outreach = True
+
+    if intent.type == "find_org":
+        entities = normalize_entities(intent.entities)
+        if entities:
+            def _org_matches(item: dict) -> bool:
+                haystack = f"{item.get('name','')} {item.get('text','')}".lower()
+                return any(e in haystack for e in entities)
+            filtered_results = [r for r in filtered_results if _org_matches(r)]
         if not filtered_results:
             need_outreach = True
 
@@ -482,7 +552,11 @@ def process_query(
         if convo and response and response.message:
             link_profile = db.get_link_system_profile(university_id)
             sender_id = link_profile.get("link_user_id") if link_profile else None
-            session = db.get_or_create_link_session(user_id, university_id)
+            session = None
+            if session_id:
+                session = db.get_link_session_for_user(session_id, user_id)
+            if not session:
+                session = db.get_or_create_link_session(user_id, university_id)
 
             if session:
                 db.set_link_conversation_session(convo["id"], session["id"])
@@ -495,7 +569,7 @@ def process_query(
                 session_id=session["id"] if session else None,
             )
 
-            if payload_data and payload_data.get("results"):
+            if payload_data and payload_data.get("results") and not need_outreach:
                 for item in payload_data["results"]:
                     item_type = item.get("type")
                     metadata = build_card_metadata(item, item_type)
@@ -511,15 +585,49 @@ def process_query(
     except Exception:
         pass
 
+    # Update user memory (best-effort)
+    memory_updated = False
+    try:
+        if user_memory is None:
+            user_memory = {}
+        total_interactions = int(user_memory.get("total_interactions") or 0) + 1
+        questions_asked = int(user_memory.get("questions_asked") or 0)
+        if intent.type in ["find_people", "find_info", "find_event", "find_org"]:
+            questions_asked += 1
+
+        known_preferences = user_memory.get("known_preferences") or {}
+        likes = set(known_preferences.get("likes") or [])
+        for pref in extract_preferences(question):
+            likes.add(pref)
+        if likes:
+            known_preferences["likes"] = sorted(likes)
+
+        memory_payload = {
+            "university_id": university_id,
+            "last_interaction_at": "now()",
+            "total_interactions": total_interactions,
+            "questions_asked": questions_asked,
+            "conversation_context": {
+                "last_intent": intent.type,
+                "last_entities": intent.entities,
+            },
+            "known_preferences": known_preferences,
+        }
+        db.upsert_user_memory(user_id, memory_payload)
+        memory_updated = True
+    except Exception:
+        memory_updated = False
+
     return {
         "intent": intent,
         "response": response,
         "results": formatted_results,
         "data": payload_data,
+        "session_id": session["id"] if "session" in locals() and session else None,
         "need_outreach": need_outreach,
         "outreach_request_id": None,
         "validation": validation,
         "sources": sources,
-        "memory_updated": False,
+        "memory_updated": memory_updated,
         "journal_entry_created": False,
     }

@@ -12,6 +12,7 @@ class QueryRequest(BaseModel):
     university_id: str
     question: str
     conversation_history: list[dict] = []
+    session_id: Optional[str] = None
 
 
 class OutreachStartRequest(BaseModel):
@@ -129,6 +130,7 @@ class QueryResponse(BaseModel):
     response: ResponseContent
     results: list[ResultItem] = []
     data: Optional[dict] = None
+    session_id: Optional[str] = None
     need_outreach: bool = False
     outreach_request_id: Optional[str] = None
     validation: ValidationInfo
