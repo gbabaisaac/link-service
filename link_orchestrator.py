@@ -260,6 +260,30 @@ def update_conversation_state(state: dict, message_text: str) -> dict:
     return state
 
 
+def recall_recent_activity(recent_user_messages: list[str], memories: list[str]) -> Optional[str]:
+    """Return a grounded recall of what the user said they did recently."""
+    patterns = [
+        r"\bi (went to|went|attended|was at|created|built|made|had|did|joined)\b[^\\.\\!\\?]*",
+        r"\bi (just|recently|earlier)\b[^\\.\\!\\?]*",
+    ]
+    for msg in reversed(recent_user_messages or []):
+        text = (msg or "").strip()
+        if not text:
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                snippet = text.strip()
+                return f"you said: \"{snippet}\""
+    # Fall back to memory snippets extracted during style updates.
+    for mem in reversed(memories or []):
+        if any(mem.startswith(prefix) for prefix in ("went_to:", "attended:", "was_at:", "created:", "built:", "made:", "event:")):
+            value = mem.split(":", 1)[-1].strip()
+            if value:
+                return f"you mentioned: {value}"
+    return None
+
+
 def determine_mode(message_text: str, intent: dict) -> str:
     """Pick conversation vs agent mode based on intent and message content."""
     text = (message_text or "").lower()

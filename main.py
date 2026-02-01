@@ -287,6 +287,7 @@ async def link_agent(request: LinkAgentRequest):
             Intent.MARKETPLACE: "campus_info",
             Intent.PROFILE_QUESTION: "casual_chat",
             Intent.PROFILE_CLASSES: "casual_chat",
+            Intent.ACTIVITY_RECALL: "casual_chat",
         }
         intent_name = intent_map.get(intent_result.intent, "casual_chat")
         intent = {
@@ -358,6 +359,34 @@ async def link_agent(request: LinkAgentRequest):
                 ui=build_ui_hints("conversation", None),
             )
 
+        if intent_result.intent == Intent.ACTIVITY_RECALL:
+            convo_history_rows = db.list_link_messages(convo["id"], limit=20)
+            recent_user_msgs = [
+                r.get("content") for r in convo_history_rows if r.get("sender_type") == "user" and r.get("content")
+            ]
+            memories = ((user_memory or {}).get("conversation_state") or {}).get("memories") or []
+            recall = link_orchestrator.recall_recent_activity(recent_user_msgs, memories)
+            reply = recall or "i don't think you told me yet — what'd you do?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                reply,
+                citations=[],
+                cards={},
+                confidence=0.6 if recall else 0.2,
+                session_id=session["id"] if session else None,
+                task_state="answered",
+            )
+            resolve_task_state(convo_state, "resolved", query=request.message_text)
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.6 if recall else 0.2,
+                answer_text=reply,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
+
         if intent_result.intent == Intent.PROFILE_CLASSES:
             classes = (user_context or {}).get("classes") or []
             if classes:
@@ -366,7 +395,10 @@ async def link_agent(request: LinkAgentRequest):
                 else:
                     names = [c.get("name") or c.get("title") or c.get("code") for c in classes]
                 names = [n for n in names if n]
-                reply = "you're taking: " + ", ".join(names[:6]) + "."
+                if names:
+                    reply = "you're taking: " + ", ".join(names[:6]) + "."
+                else:
+                    reply = "i don't see your schedule yet. want me to pull it in?"
             else:
                 reply = "i don't see your schedule yet. want me to pull it in?"
             link_orchestrator.insert_link_response(
@@ -574,7 +606,9 @@ async def link_agent(request: LinkAgentRequest):
                 session_id=session["id"] if session else None,
                 task_state="answered",
             )
+            cards_payload = {}
             if db_first.get("type") == "list_orgs":
+                cards_payload = {"club_ids": [o.get("id") for o in (db_first.get("items") or []) if o.get("id")]}
                 link_orchestrator.insert_cards_from_items(
                     convo["id"],
                     request.university_id,
@@ -583,6 +617,7 @@ async def link_agent(request: LinkAgentRequest):
                     session_id=session["id"] if session else None,
                 )
             if db_first.get("type") == "list_events":
+                cards_payload = {"event_ids": [e.get("id") for e in (db_first.get("items") or []) if e.get("id")]}
                 link_orchestrator.insert_cards_from_items(
                     convo["id"],
                     request.university_id,
@@ -591,6 +626,7 @@ async def link_agent(request: LinkAgentRequest):
                     session_id=session["id"] if session else None,
                 )
             if db_first.get("type") == "list_people":
+                cards_payload = {"user_ids": [p.get("id") for p in (db_first.get("items") or []) if p.get("id")]}
                 link_orchestrator.insert_cards_from_items(
                     convo["id"],
                     request.university_id,
@@ -603,7 +639,7 @@ async def link_agent(request: LinkAgentRequest):
                 mode="answered",
                 confidence=db_first.get("confidence", 0.7),
                 answer_text=reply,
-                cards={},
+                cards=cards_payload,
                 citations=db_first.get("citations") or [],
                 task=None,
                 ui=build_ui_hints("conversation", None),

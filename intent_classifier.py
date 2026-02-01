@@ -17,6 +17,7 @@ class Intent(str, Enum):
     CAMPUS_INFO = "campus_info"
     PROFILE_QUESTION = "profile_question"
     PROFILE_CLASSES = "profile_classes"
+    ACTIVITY_RECALL = "activity_recall"
     COUNT_QUERY = "count_query"
     CAMPUS_INFO = "campus_info"
     FOOD = "food"
@@ -87,8 +88,24 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
 
     if any(x in text for x in ["who am i", "what do you know about me", "do you know me", "tell me about myself"]):
         return IntentResult(Intent.PROFILE_QUESTION, entities, raw)
+    if any(
+        x in text
+        for x in [
+            "what did i do today",
+            "what did i do yesterday",
+            "what did i do earlier",
+            "what did i do this morning",
+            "what did i do tonight",
+            "remind me what i did",
+            "what did i do",
+        ]
+    ):
+        return IntentResult(Intent.ACTIVITY_RECALL, entities, raw)
     if any(x in text for x in ["what classes am i taking", "my classes", "my schedule", "this semester", "current classes"]):
         return IntentResult(Intent.PROFILE_CLASSES, entities, raw)
+
+    if any(x in text for x in ["how many", "count", "number of"]):
+        return IntentResult(Intent.COUNT_QUERY, entities, raw)
 
     if any(x in text for x in ["club", "clubs", "org", "organization", "organizations", "compsci", "computer science", "cs "]):
         return IntentResult(Intent.CLUB_SEARCH, entities, raw)
@@ -123,9 +140,6 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
         return IntentResult(Intent.SOCIAL, entities, raw)
     if any(x in text for x in ["buy", "sell", "market", "textbook", "bike", "sublet"]):
         return IntentResult(Intent.MARKETPLACE, entities, raw)
-
-    if any(x in text for x in ["how many", "count", "number of"]):
-        return IntentResult(Intent.COUNT_QUERY, entities, raw)
 
     # If user is responding while an active task exists, treat as followup.
     if active_task:
