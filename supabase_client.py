@@ -494,7 +494,15 @@ def upsert_user_memory(user_id: str, data: dict) -> dict:
     """Create or update user memory."""
     client = get_supabase_client()
     data["user_id"] = user_id
-    return client.table("link_user_memory").upsert(data, on_conflict="user_id").execute().data[0]
+    try:
+        return client.table("link_user_memory").upsert(data, on_conflict="user_id").execute().data[0]
+    except Exception as exc:
+        # If schema cache lags (missing new columns), retry without them.
+        if "conversation_state" in data:
+            data = dict(data)
+            data.pop("conversation_state", None)
+            return client.table("link_user_memory").upsert(data, on_conflict="user_id").execute().data[0]
+        raise exc
 
 
 # ============ Journal Functions ============
