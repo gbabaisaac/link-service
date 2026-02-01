@@ -1090,7 +1090,7 @@ def try_db_query(question: str, intent: str, records: dict, tags: Optional[list[
             return {
                 "type": "list_orgs",
                 "answer_text": "here are a couple clubs that match:",
-                "cards": {"club_ids": [o.get("id") for o in picked]},
+                "items": picked,
                 "citations": [{"type": "club", "id": o.get("id")} for o in picked],
                 "confidence": 0.8,
             }
@@ -1102,7 +1102,7 @@ def try_db_query(question: str, intent: str, records: dict, tags: Optional[list[
             return {
                 "type": "list_events",
                 "answer_text": "here are a couple events coming up:",
-                "cards": {"event_ids": [e.get("id") for e in picked]},
+                "items": picked,
                 "citations": [{"type": "event", "id": e.get("id")} for e in picked],
                 "confidence": 0.8,
             }
@@ -1114,11 +1114,39 @@ def try_db_query(question: str, intent: str, records: dict, tags: Optional[list[
             return {
                 "type": "list_people",
                 "answer_text": "i found a couple people:",
-                "cards": {"user_ids": [p.get("id") for p in picked]},
+                "items": picked,
                 "citations": [{"type": "user", "id": p.get("id")} for p in picked],
                 "confidence": 0.75,
             }
     return None
+
+
+def insert_cards_from_items(
+    conversation_id: str,
+    university_id: str,
+    items: list[dict],
+    item_type: str,
+    session_id: Optional[str] = None,
+) -> None:
+    """Insert card messages directly from item payloads."""
+    link_profile = db.get_link_system_profile(university_id)
+    sender_id = link_profile.get("link_user_id") if link_profile else None
+    for item in items:
+        metadata = build_card_metadata(item, item_type)
+        if metadata:
+            title = (
+                item.get("title")
+                or item.get("name")
+                or item.get("full_name")
+                or "Card"
+            )
+            db.insert_link_message(
+                conversation_id,
+                sender_id,
+                title,
+                metadata,
+                session_id=session_id,
+            )
 
 
 def build_outreach_message(

@@ -499,17 +499,41 @@ async def link_agent(request: LinkAgentRequest):
                 request.university_id,
                 reply,
                 citations=db_first.get("citations") or [],
-                cards=db_first.get("cards") or {},
+                cards={},
                 confidence=db_first.get("confidence", 0.7),
                 session_id=session["id"] if session else None,
                 task_state="answered",
             )
+            if db_first.get("type") == "list_orgs":
+                link_orchestrator.insert_cards_from_items(
+                    convo["id"],
+                    request.university_id,
+                    db_first.get("items") or [],
+                    "organization",
+                    session_id=session["id"] if session else None,
+                )
+            if db_first.get("type") == "list_events":
+                link_orchestrator.insert_cards_from_items(
+                    convo["id"],
+                    request.university_id,
+                    db_first.get("items") or [],
+                    "event",
+                    session_id=session["id"] if session else None,
+                )
+            if db_first.get("type") == "list_people":
+                link_orchestrator.insert_cards_from_items(
+                    convo["id"],
+                    request.university_id,
+                    db_first.get("items") or [],
+                    "profile",
+                    session_id=session["id"] if session else None,
+                )
             resolve_task_state(convo_state, "resolved", query=request.message_text)
             return LinkAgentResponse(
                 mode="answered",
                 confidence=db_first.get("confidence", 0.7),
                 answer_text=reply,
-                cards=db_first.get("cards") or {},
+                cards={},
                 citations=db_first.get("citations") or [],
                 task=None,
                 ui=build_ui_hints("conversation", None),
