@@ -177,19 +177,32 @@ async def link_agent(request: LinkAgentRequest):
         )
         style_instructions = link_orchestrator.build_style_instructions(user_memory)
 
-        intent = link_orchestrator.route_intent(request.message_text)
+        user_context = None
+        if request.access_token:
+            user_context = db.get_profile_rls(request.access_token, request.user_id)
+        if not user_context:
+            user_context = db.get_profile(request.user_id, enforce_public=False)
+        memory_context = db.get_user_memory(request.user_id) or {}
+        intent = link_orchestrator.route_intent(request.message_text, user_context=user_context)
+        intent["user_context"] = {"profile": user_context, "memory": memory_context}
         capability = link_orchestrator.route_capability(request.message_text, intent)
         mode = link_orchestrator.determine_mode(request.message_text, intent)
+        lower = (request.message_text or "").lower().strip()
+        active_run = db.get_latest_active_outreach_run(request.user_id)
+        # If user is replying/negating, keep conversation mode even if capability router says agent.
+        if active_run and any(
+            lower.startswith(x)
+            for x in ["no", "nah", "not me", "that's not me", "um no", "nope", "yes", "yep"]
+        ):
+            mode = "conversation"
         if capability.get("can_answer_from_db"):
             mode = "agent"
         if mode == "conversation":
-            lower = (request.message_text or "").lower()
             profile = None
             if request.access_token:
                 profile = db.get_profile_rls(request.access_token, request.user_id)
             if not profile:
                 profile = db.get_profile(request.user_id, enforce_public=False)
-            active_run = db.get_latest_active_outreach_run(request.user_id)
             if any(x in lower for x in ["who am i", "do you know me", "what do you know about me"]):
                 if profile:
                     name = profile.get("full_name") or "friend"
@@ -218,6 +231,8 @@ async def link_agent(request: LinkAgentRequest):
                     reply = f"yep — i texted a few people about \"{active_run.get('query')}\"."
                 else:
                     reply = "not yet — want me to ask around?"
+            elif "that's not me" in lower or "thats not me" in lower:
+                reply = "oops, my bad. want me to update what i know about you?"
             else:
                 smalltalk_type = link_orchestrator.classify_smalltalk(request.message_text)
                 if smalltalk_type == "capabilities":
@@ -229,13 +244,14 @@ async def link_agent(request: LinkAgentRequest):
                     name = profile.get("full_name") if profile else None
                     if name:
                         reply = f"yo {name.split()[0]} - {reply}"
-                memories = (user_memory or {}).get("conversation_state", {}).get("memories") or []
-                for mem in reversed(memories):
-                    if mem.startswith("name:"):
-                        remembered = mem.split("name:", 1)[-1].strip()
-                        if remembered and "yo " not in reply:
-                            reply = f"yo {remembered.title()} - {reply}"
-                            break
+                if not profile:
+                    memories = (user_memory or {}).get("conversation_state", {}).get("memories") or []
+                    for mem in reversed(memories):
+                        if mem.startswith("name:"):
+                            remembered = mem.split("name:", 1)[-1].strip()
+                            if remembered and "yo " not in reply:
+                                reply = f"yo {remembered.title()} - {reply}"
+                                break
             if active_run and active_run.get("query") and "what are you asking" not in lower:
                 reply = f"{reply} btw i'm still asking about \"{active_run.get('query')}\". want me to check in?"
             link_orchestrator.insert_link_response(

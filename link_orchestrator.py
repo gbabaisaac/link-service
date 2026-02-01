@@ -398,6 +398,7 @@ def route_capability(question: str, intent: dict) -> dict:
 
 Question: "{question}"
 Intent: {intent}
+User context: {intent.get("user_context")}
 
 DB sources available: events, organizations (clubs), profiles (public yearbook), forums/posts.
 If answerable from DB, list which sources to query.
@@ -1160,11 +1161,9 @@ def start_outreach(
                     requester_profile.get("full_name") or "Profile",
                     profile_metadata,
                 )
-        reason = question or "this"
         db.insert_message(
             convo["id"],
             sender_id,
-            f"{requester_profile.get('full_name') if requester_profile else 'Someone'} is looking for {reason}. "
             "Want an intro? Reply YES or NO.",
             {"shareType": "text"},
         )
@@ -1318,11 +1317,9 @@ def collect_outreach(
                             requester_profile.get("full_name") or "Profile",
                             profile_metadata,
                         )
-                reason = run.get("query") or "this"
                 db.insert_message(
                     convo["id"],
                     sender_id,
-                    f"{requester_profile.get('full_name') if requester_profile else 'Someone'} is looking for {reason}. "
                     "Want an intro? Reply YES or NO.",
                     {"shareType": "text"},
                 )
@@ -1384,11 +1381,9 @@ def collect_outreach(
                             requester_profile.get("full_name") or "Profile",
                             profile_metadata,
                         )
-                reason = run.get("query") or "this"
                 db.insert_message(
                     convo["id"],
                     sender_id,
-                    f"{requester_profile.get('full_name') if requester_profile else 'Someone'} is looking for {reason}. "
                     "Want an intro? Reply YES or NO.",
                     {"shareType": "text"},
                 )
