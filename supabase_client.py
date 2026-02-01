@@ -746,6 +746,12 @@ def upsert_user_memory(user_id: str, data: dict) -> dict:
     """Create or update user memory."""
     client = get_supabase_client()
     data["user_id"] = user_id
+    if not data.get("university_id"):
+        existing = get_user_memory(user_id) or {}
+        data["university_id"] = existing.get("university_id")
+        if not data.get("university_id"):
+            profile = get_profile(user_id, enforce_public=False) or {}
+            data["university_id"] = profile.get("university_id")
     try:
         return client.table("link_user_memory").upsert(data, on_conflict="user_id").execute().data[0]
     except Exception as exc:
