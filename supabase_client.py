@@ -228,6 +228,21 @@ def get_profiles_count(university_id: Optional[str] = None) -> int:
         return 0
 
 
+def get_profiles_count_by_major(major_query: str, university_id: Optional[str] = None) -> int:
+    """Count profiles matching a major query (case-insensitive)."""
+    try:
+        client = get_supabase_client()
+        query = client.table("profiles").select("id", count="exact").neq("is_link", True)
+        if university_id:
+            query = query.eq("university_id", university_id)
+        if major_query:
+            query = query.ilike("major", f"%{major_query}%")
+        result = query.execute()
+        return result.count or 0
+    except Exception:
+        return 0
+
+
 def get_organization(org_id: str) -> Optional[dict]:
     """Fetch a single public organization."""
     client = get_supabase_client()

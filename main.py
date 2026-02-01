@@ -271,6 +271,7 @@ async def link_agent(request: LinkAgentRequest):
             Intent.CAMPUS_INFO: "campus_info",
             Intent.DB_QUERY: "campus_info",
             Intent.PROFILE_QUESTION: "casual_chat",
+            Intent.PROFILE_CLASSES: "casual_chat",
         }
         intent_name = intent_map.get(intent_result.intent, "casual_chat")
         intent = {
@@ -322,6 +323,34 @@ async def link_agent(request: LinkAgentRequest):
             if interests:
                 parts.append(f"into {', '.join(interests[:3])}")
             reply = ", ".join(parts) + ". want me to update anything?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                reply,
+                citations=[],
+                cards={},
+                confidence=0.8,
+                session_id=session["id"] if session else None,
+                task_state="answered",
+            )
+            resolve_task_state(convo_state, "resolved", query=request.message_text)
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.8,
+                answer_text=reply,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
+
+        if intent_result.intent == Intent.PROFILE_CLASSES:
+            classes = (user_context or {}).get("classes") or []
+            if classes:
+                names = [c.get("name") or c.get("title") or c.get("code") for c in classes]
+                names = [n for n in names if n]
+                reply = "you're taking: " + ", ".join(names[:6]) + "."
+            else:
+                reply = "i don't see your schedule yet. want me to pull it in?"
             link_orchestrator.insert_link_response(
                 convo["id"],
                 request.university_id,
@@ -474,6 +503,29 @@ async def link_agent(request: LinkAgentRequest):
             if db_first.get("type") == "count_users":
                 count = db.get_profiles_count(request.university_id)
                 reply = f"looks like there are {count} users on the app."
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.8,
+                    session_id=session["id"] if session else None,
+                    task_state="answered",
+                )
+                resolve_task_state(convo_state, "resolved", query=request.message_text)
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.8,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
+            if db_first.get("type") == "count_major":
+                major_query = db_first.get("major_query") or "computer science"
+                count = db.get_profiles_count_by_major(major_query, request.university_id)
+                reply = f"looks like there are {count} {major_query} majors on campus."
                 link_orchestrator.insert_link_response(
                     convo["id"],
                     request.university_id,

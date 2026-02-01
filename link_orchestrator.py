@@ -1080,6 +1080,9 @@ def try_db_query(question: str, intent: str, records: dict, tags: Optional[list[
             return {"type": "count_orgs"}
         if any(x in text for x in ["event", "events"]):
             return {"type": "count_events"}
+        if "major" in text:
+            major_query = (tags or [None])[0]
+            return {"type": "count_major", "major_query": major_query}
     if "how many" in text and any(x in text for x in ["user", "users", "students", "people"]):
         return {"type": "count_users"}
     if intent in {"club_search", "campus_info"}:
