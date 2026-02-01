@@ -19,7 +19,6 @@ class Intent(str, Enum):
     PROFILE_CLASSES = "profile_classes"
     ACTIVITY_RECALL = "activity_recall"
     COUNT_QUERY = "count_query"
-    CAMPUS_INFO = "campus_info"
     FOOD = "food"
     HOUSING = "housing"
     TECH = "tech"
