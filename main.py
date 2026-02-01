@@ -550,6 +550,30 @@ async def link_agent(request: LinkAgentRequest):
         else:
             pre_records = pre_records or {"events": [], "orgs": [], "profiles": [], "facts": []}
         db_first = link_orchestrator.try_db_query(request.message_text, intent["intent"], pre_records, tags=intent.get("tags") or [])
+        fallback_db_first = None
+        if not db_first and pre_records:
+            if intent_result.intent == Intent.EVENT_SEARCH:
+                events = pre_records.get("events") or []
+                if events:
+                    fallback_db_first = {
+                        "type": "list_events",
+                        "answer_text": "here are a couple events coming up:",
+                        "items": events[:2],
+                        "citations": [{"type": "event", "id": e.get("id")} for e in events[:2]],
+                        "confidence": 0.7,
+                    }
+            if intent_result.intent == Intent.CLUB_SEARCH:
+                orgs = pre_records.get("orgs") or []
+                if orgs:
+                    fallback_db_first = {
+                        "type": "list_orgs",
+                        "answer_text": "here are a couple clubs that match:",
+                        "items": orgs[:2],
+                        "citations": [{"type": "club", "id": o.get("id")} for o in orgs[:2]],
+                        "confidence": 0.7,
+                    }
+        if fallback_db_first:
+            db_first = fallback_db_first
         if db_first:
             if db_first.get("type") == "count_orgs":
                 count = db.get_organizations_count(request.university_id)
