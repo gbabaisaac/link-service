@@ -14,21 +14,7 @@ import supabase_client as db
 
 def llm_json(prompt: str, temperature: float = 0.0) -> dict:
     """Call the configured LLM and return a JSON object (dict)."""
-    if settings.LLM_PROVIDER == "gemini":
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GOOGLE_API_KEY)
-        # Request JSON output
-        model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            generation_config={"response_mime_type": "application/json", "temperature": temperature},
-        )
-        resp = model.generate_content(prompt)
-        text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if resp.candidates else "{}")
-        try:
-            return json.loads(text or "{}")
-        except Exception:
-            return {}
-    else:
+    def _openai_call() -> dict:
         from openai import OpenAI
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
         resp = client.chat.completions.create(
@@ -37,8 +23,29 @@ def llm_json(prompt: str, temperature: float = 0.0) -> dict:
             response_format={"type": "json_object"},
             temperature=temperature,
         )
+        return json.loads(resp.choices[0].message.content or "{}")
+
+    if settings.LLM_PROVIDER == "gemini":
         try:
-            return json.loads(resp.choices[0].message.content or "{}")
+            import google.generativeai as genai
+            genai.configure(api_key=settings.GOOGLE_API_KEY)
+            model = genai.GenerativeModel(
+                "gemini-2.0-flash",
+                generation_config={"response_mime_type": "application/json", "temperature": temperature},
+            )
+            resp = model.generate_content(prompt)
+            text = getattr(resp, "text", None) or (resp.candidates[0].content.parts[0].text if resp.candidates else "{}")
+            return json.loads(text or "{}")
+        except Exception:
+            if settings.OPENAI_API_KEY:
+                try:
+                    return _openai_call()
+                except Exception:
+                    return {}
+            return {}
+    else:
+        try:
+            return _openai_call()
         except Exception:
             return {}
 
