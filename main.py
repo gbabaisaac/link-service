@@ -1,6 +1,7 @@
 """Link AI - FastAPI Application."""
 
 from fastapi import FastAPI, Header, HTTPException
+import re
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from datetime import datetime
@@ -343,6 +344,18 @@ async def link_agent(request: LinkAgentRequest):
         )
         mode = transition.mode
         active_task = transition.active_task
+        # If user starts a new non-followup question, clear any old outreach UI state.
+        if mode == "outreach" and intent_result.intent not in {Intent.FOLLOWUP, Intent.CONSENT_RESPONSE}:
+            mode = "conversation"
+            active_task = None
+            db.update_link_conversation_state(
+                convo_state["id"],
+                {
+                    "mode": "conversation",
+                    "active_task": None,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                },
+            )
         db.update_link_conversation_state(
             convo_state["id"],
             {
@@ -395,7 +408,7 @@ async def link_agent(request: LinkAgentRequest):
                 r.get("content") for r in convo_history_rows if r.get("sender_type") == "user" and r.get("content")
             ]
             memories = ((user_memory or {}).get("conversation_state") or {}).get("memories") or []
-            recall = link_orchestrator.recall_recent_activity(recent_user_msgs, memories)
+            recall = link_orchestrator.recall_recent_activity(request.message_text, recent_user_msgs, memories)
             reply = recall or "i don't think you told me yet — what'd you do?"
             link_orchestrator.insert_link_response(
                 convo["id"],
@@ -718,6 +731,39 @@ async def link_agent(request: LinkAgentRequest):
 
         if mode == "conversation":
             profile = user_context.get("profile") if user_context else None
+            recent_link_msgs = db.list_recent_link_messages(convo["id"], sender_type="link", limit=3)
+            last_link_text = " ".join([m.get("content") or "" for m in recent_link_msgs]).lower()
+            if "update anything" in last_link_text and "?" not in lower:
+                prefs = (user_memory or {}).get("known_preferences") or {}
+                likes = prefs.get("likes") or []
+                for part in re.split(r",| and |/|&", request.message_text):
+                    value = (part or "").strip()
+                    if value and value.lower() not in [x.lower() for x in likes]:
+                        likes.append(value)
+                if likes:
+                    prefs["likes"] = likes[-5:]
+                    db.upsert_user_memory(request.user_id, {"known_preferences": prefs})
+                    reply = "bet, i’ll remember that."
+                else:
+                    reply = "gotchu. want me to add anything specific?"
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.4,
+                    session_id=session["id"] if session else None,
+                    task_state="conversation",
+                )
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.4,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
             if any(x in lower for x in ["end that task", "stop asking", "cancel that", "drop that", "stop that"]):
                 if active_run:
                     db.update_link_outreach_run(

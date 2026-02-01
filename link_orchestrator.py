@@ -279,8 +279,14 @@ def update_conversation_state(state: dict, message_text: str) -> dict:
     return state
 
 
-def recall_recent_activity(recent_user_messages: list[str], memories: list[str]) -> Optional[str]:
+def recall_recent_activity(question: str, recent_user_messages: list[str], memories: list[str]) -> Optional[str]:
     """Return a grounded recall of what the user said they did recently."""
+    q = (question or "").lower()
+    time_hint = "today"
+    if "yesterday" in q:
+        time_hint = "yesterday"
+    elif any(x in q for x in ["this morning", "earlier", "tonight"]):
+        time_hint = "earlier"
     patterns = [
         r"\bi (went to|went|attended|was at|created|built|made|had|did|joined)\b[^\\.\\!\\?]*",
         r"\bi (just|recently|earlier)\b[^\\.\\!\\?]*",
@@ -293,13 +299,18 @@ def recall_recent_activity(recent_user_messages: list[str], memories: list[str])
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 snippet = text.strip()
-                return f"you said: \"{snippet}\""
+                snippet = re.sub(r"\\blink\\b", "", snippet, flags=re.IGNORECASE).strip()
+                if "hackathon" in snippet and any(x in snippet for x in ["built", "created", "made"]):
+                    return f"{time_hint} you said you built me at a hackathon."
+                return f"{time_hint} you said: \"{snippet}\""
     # Fall back to memory snippets extracted during style updates.
     for mem in reversed(memories or []):
         if any(mem.startswith(prefix) for prefix in ("went_to:", "attended:", "was_at:", "created:", "built:", "made:", "event:")):
             value = mem.split(":", 1)[-1].strip()
             if value:
-                return f"you mentioned: {value}"
+                if "hackathon" in value and any(x in mem for x in ["created", "built", "made"]):
+                    return f"{time_hint} you said you built me at a hackathon."
+                return f"{time_hint} you mentioned: {value}"
     return None
 
 
