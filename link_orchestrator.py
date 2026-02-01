@@ -403,6 +403,10 @@ def dedupe_response(conversation_id: str, text: str, intent_type: str = "general
             return 0.0
         return len(wa & wb) / max(len(wa | wb), 1)
 
+    # Block repeated capability pitch in same conversation.
+    if text and "i can help you find people, clubs, and events" in text.lower():
+        if any("i can help you find people, clubs, and events" in (t or "").lower() for t in recent_texts):
+            return "gotchu. what's up?"
     is_dup = text and text in recent_texts
     if not is_dup and text:
         for recent_text in recent_texts:
@@ -1037,7 +1041,14 @@ Return JSON:
     }
 
 
-def try_db_query(question: str, intent: str, records: dict) -> Optional[dict]:
+def _matches_record(record: dict, tags: list[str]) -> bool:
+    if not tags:
+        return True
+    hay = " ".join([str(record.get(k, "")) for k in ["name", "title", "category", "mission_statement", "description"]]).lower()
+    return any(t.lower() in hay for t in tags if t)
+
+
+def try_db_query(question: str, intent: str, records: dict, tags: Optional[list[str]] = None) -> Optional[dict]:
     """Deterministic DB-first answers for obvious queries (no LLM)."""
     text = (question or "").lower()
     if "how many" in text:
@@ -1045,10 +1056,13 @@ def try_db_query(question: str, intent: str, records: dict) -> Optional[dict]:
             return {"type": "count_orgs"}
         if any(x in text for x in ["event", "events"]):
             return {"type": "count_events"}
+    if "how many" in text and any(x in text for x in ["user", "users", "students", "people"]):
+        return {"type": "count_users"}
     if intent in {"club_search", "campus_info"}:
         orgs = records.get("orgs") or []
         if orgs:
-            picked = [o for o in orgs if o.get("id")][:2]
+            filtered = [o for o in orgs if _matches_record(o, tags or [])]
+            picked = (filtered or orgs)[:2]
             return {
                 "type": "list_orgs",
                 "answer_text": "here are a couple clubs that match:",
@@ -1059,7 +1073,8 @@ def try_db_query(question: str, intent: str, records: dict) -> Optional[dict]:
     if intent == "event_search":
         events = records.get("events") or []
         if events:
-            picked = [e for e in events if e.get("id")][:2]
+            filtered = [e for e in events if _matches_record(e, tags or [])]
+            picked = (filtered or events)[:2]
             return {
                 "type": "list_events",
                 "answer_text": "here are a couple events coming up:",
@@ -1070,7 +1085,8 @@ def try_db_query(question: str, intent: str, records: dict) -> Optional[dict]:
     if intent == "person_search":
         profiles = records.get("profiles") or []
         if profiles:
-            picked = [p for p in profiles if p.get("id")][:2]
+            filtered = [p for p in profiles if _matches_record(p, tags or [])]
+            picked = (filtered or profiles)[:2]
             return {
                 "type": "list_people",
                 "answer_text": "i found a couple people:",

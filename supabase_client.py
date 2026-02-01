@@ -210,7 +210,17 @@ def get_organizations_count(university_id: Optional[str] = None) -> int:
         if university_id:
             query = query.eq("university_id", university_id)
         result = query.execute()
-        return result.count or 0
+    return result.count or 0
+
+
+def get_profiles_count(university_id: Optional[str] = None) -> int:
+    """Get count of profiles (non-Link)."""
+    client = get_supabase_client()
+    query = client.table("profiles").select("id", count="exact").neq("is_link", True)
+    if university_id:
+        query = query.eq("university_id", university_id)
+    result = query.execute()
+    return result.count or 0
     except Exception:
         return 0
 

@@ -248,12 +248,19 @@ async def link_agent(request: LinkAgentRequest):
         intent_result = classify_intent(request.message_text, active_task=active_task)
         lower = (request.message_text or "").lower().strip()
         active_run = db.get_latest_active_outreach_run(request.user_id)
+        # If this is a follow-up to a recent org/club query, treat it as club search.
+        if intent_result.intent == Intent.FOLLOWUP:
+            resolved = convo_state.get("resolved_tasks") or []
+            last = resolved[-1] if resolved else None
+            if last and (last.get("type") in {"db_query", "club_search"} or "club" in (last.get("query") or "")):
+                intent_result = classify_intent("club", active_task=active_task)
         intent_map = {
             Intent.EVENT_SEARCH: "event_search",
             Intent.PEOPLE_SEARCH: "person_search",
             Intent.CLUB_SEARCH: "club_search",
             Intent.CAMPUS_INFO: "campus_info",
             Intent.DB_QUERY: "campus_info",
+            Intent.PROFILE_QUESTION: "casual_chat",
         }
         intent_name = intent_map.get(intent_result.intent, "casual_chat")
         intent = {
@@ -290,6 +297,41 @@ async def link_agent(request: LinkAgentRequest):
                 "updated_at": datetime.utcnow().isoformat() + "Z",
             },
         )
+        if intent_result.intent == Intent.PROFILE_QUESTION:
+            profile = user_context.get("profile") if user_context else None
+            prefs = (user_memory or {}).get("known_preferences") or {}
+            preferred = prefs.get("preferred_name")
+            name = preferred or (profile.get("full_name") if profile else None) or "friend"
+            major = profile.get("major") if profile else None
+            interests = profile.get("interests") or []
+            if isinstance(interests, str):
+                interests = [interests]
+            parts = [f"you're {name}"]
+            if major:
+                parts.append(f"{major} major")
+            if interests:
+                parts.append(f"into {', '.join(interests[:3])}")
+            reply = ", ".join(parts) + ". want me to update anything?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                reply,
+                citations=[],
+                cards={},
+                confidence=0.8,
+                session_id=session["id"] if session else None,
+                task_state="answered",
+            )
+            resolve_task_state(convo_state, "resolved", query=request.message_text)
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.8,
+                answer_text=reply,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
+
         if mode == "awaiting_consent" and intent_result.intent == Intent.CONSENT_RESPONSE:
             active_run = db.get_latest_active_outreach_run(request.user_id)
             if active_run and active_run.get("status") == "awaiting_consent":
@@ -373,7 +415,7 @@ async def link_agent(request: LinkAgentRequest):
             )
         else:
             pre_records = pre_records or {"events": [], "orgs": [], "profiles": [], "facts": []}
-        db_first = link_orchestrator.try_db_query(request.message_text, intent["intent"], pre_records)
+        db_first = link_orchestrator.try_db_query(request.message_text, intent["intent"], pre_records, tags=intent.get("tags") or [])
         if db_first:
             if db_first.get("type") == "count_orgs":
                 count = db.get_organizations_count(request.university_id)
@@ -400,6 +442,28 @@ async def link_agent(request: LinkAgentRequest):
             if db_first.get("type") == "count_events":
                 count = db.get_events_count(request.university_id)
                 reply = f"looks like there are {count} events on campus."
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.8,
+                    session_id=session["id"] if session else None,
+                    task_state="answered",
+                )
+                resolve_task_state(convo_state, "resolved", query=request.message_text)
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.8,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
+            if db_first.get("type") == "count_users":
+                count = db.get_profiles_count(request.university_id)
+                reply = f"looks like there are {count} users on the app."
                 link_orchestrator.insert_link_response(
                     convo["id"],
                     request.university_id,

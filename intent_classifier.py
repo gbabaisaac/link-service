@@ -15,6 +15,7 @@ class Intent(str, Enum):
     EVENT_SEARCH = "event_search"
     CLUB_SEARCH = "club_search"
     CAMPUS_INFO = "campus_info"
+    PROFILE_QUESTION = "profile_question"
     CONSENT_RESPONSE = "consent_response"
     CANCEL_TASK = "cancel_task"
     UNKNOWN = "unknown"
@@ -70,10 +71,10 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
     if any(x in text for x in ["how are you", "how's your day", "what's good", "wyd", "hru"]):
         return IntentResult(Intent.SMALL_TALK, entities, raw)
 
-    if any(x in text for x in ["who am i", "what do you know about me", "do you know me"]):
-        return IntentResult(Intent.SMALL_TALK, entities, raw)
+    if any(x in text for x in ["who am i", "what do you know about me", "do you know me", "tell me about myself"]):
+        return IntentResult(Intent.PROFILE_QUESTION, entities, raw)
 
-    if any(x in text for x in ["club", "clubs", "org", "organization", "organizations"]):
+    if any(x in text for x in ["club", "clubs", "org", "organization", "organizations", "compsci", "computer science", "cs "]):
         return IntentResult(Intent.CLUB_SEARCH, entities, raw)
 
     if any(x in text for x in ["event", "events", "party", "show", "concert", "talk"]):

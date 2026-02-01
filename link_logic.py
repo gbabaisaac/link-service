@@ -337,6 +337,8 @@ def build_card_metadata(item: dict, item_type: str) -> Optional[dict]:
         return {
             "shareType": "profile",
             "user_id": item.get("id"),
+            "profile_id": item.get("id"),
+            "id": item.get("id"),
             "full_name": item.get("full_name"),
             "username": item.get("username"),
             "avatar_url": item.get("avatar_url"),
