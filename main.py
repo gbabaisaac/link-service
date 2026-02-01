@@ -183,9 +183,34 @@ async def link_agent(request: LinkAgentRequest):
         if capability.get("can_answer_from_db"):
             mode = "agent"
         if mode == "conversation":
-            reply = link_orchestrator.generate_small_talk_response(
-                request.message_text, user_memory
-            )
+            lower = (request.message_text or "").lower()
+            if any(x in lower for x in ["who am i", "do you know me", "what do you know about me"]):
+                profile = None
+                if request.access_token:
+                    profile = db.get_profile_rls(request.access_token, request.user_id)
+                if not profile:
+                    profile = db.get_profile(request.user_id, enforce_public=False)
+                if profile:
+                    name = profile.get("full_name") or "friend"
+                    username = profile.get("username")
+                    major = profile.get("major")
+                    interests = profile.get("interests") or []
+                    if isinstance(interests, str):
+                        interests = [interests]
+                    summary_parts = [f"you're {name}"]
+                    if username:
+                        summary_parts.append(f"(@{username})")
+                    if major:
+                        summary_parts.append(f"majoring in {major}")
+                    if interests:
+                        summary_parts.append(f"into {', '.join(interests[:3])}")
+                    reply = "i know that " + " ".join(summary_parts) + "."
+                else:
+                    reply = "i don't see your profile yet — want to fill it in?"
+            else:
+                reply = link_orchestrator.generate_small_talk_response(
+                    request.message_text, user_memory
+                )
             active_run = db.get_latest_active_outreach_run(request.user_id)
             if active_run and "status" in (active_run or {}):
                 # Light reminder without derailing the convo
