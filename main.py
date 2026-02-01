@@ -113,6 +113,16 @@ def build_ui_hints(mode: str, active_task: Optional[dict]) -> dict:
     }
 
 
+def build_conversation_history(conversation_id: str, limit: int = 20) -> str:
+    rows = db.list_link_messages(conversation_id, limit=limit)
+    parts = []
+    for row in rows:
+        role = "User" if row.get("sender_type") == "user" else "Link"
+        content = row.get("content") or ""
+        parts.append(f"{role}: {content}")
+    return "\n".join(parts)
+
+
 @app.on_event("startup")
 async def startup_tasks():
     """Optional startup tasks."""
@@ -562,8 +572,11 @@ async def link_agent(request: LinkAgentRequest):
                 reply = "oops, my bad. want me to update what i know about you?"
             else:
                 smalltalk_type = link_orchestrator.classify_smalltalk(request.message_text)
+                convo_history = build_conversation_history(convo["id"], limit=20)
                 if smalltalk_type == "capabilities":
-                    reply = link_orchestrator.generate_capabilities_response(request.message_text, user_memory)
+                    reply = link_orchestrator.generate_capabilities_response(
+                        request.message_text, user_memory, conversation_history=convo_history
+                    )
                 else:
                     recent_user_msgs = [
                         m.get("content")
@@ -571,7 +584,10 @@ async def link_agent(request: LinkAgentRequest):
                         if m.get("content")
                     ]
                     reply = link_orchestrator.generate_small_talk_response(
-                        request.message_text, user_memory, recent_user_messages=recent_user_msgs
+                        request.message_text,
+                        user_memory,
+                        recent_user_messages=recent_user_msgs,
+                        conversation_history=convo_history,
                     )
             if any(x in lower for x in ["end that task", "stop asking", "cancel that", "drop that", "stop that"]):
                 db.update_link_conversation_state(

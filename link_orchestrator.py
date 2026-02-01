@@ -217,6 +217,25 @@ def update_conversation_state(state: dict, message_text: str) -> dict:
     if any(x in text for x in ["looking for", "need", "help with", "trying to"]):
         goals.add(text[:80])
 
+    # Extract lightweight facts from recent user messages.
+    fact_patterns = [
+        (r"i went to ([^\\.\\!\\?]+)", "went_to"),
+        (r"i attended ([^\\.\\!\\?]+)", "attended"),
+        (r"i was at ([^\\.\\!\\?]+)", "was_at"),
+        (r"i created ([^\\.\\!\\?]+)", "created"),
+        (r"i built ([^\\.\\!\\?]+)", "built"),
+        (r"i made ([^\\.\\!\\?]+)", "made"),
+        (r"i love ([^\\.\\!\\?]+)", "love"),
+        (r"i like ([^\\.\\!\\?]+)", "like"),
+        (r"i hate ([^\\.\\!\\?]+)", "hate"),
+    ]
+    for pattern, label in fact_patterns:
+        match = re.search(pattern, text)
+        if match:
+            value = match.group(1).strip()
+            if value:
+                memories.append(f"{label}:{value}")
+
     if "my name is " in text:
         name = text.split("my name is ", 1)[-1].split(".")[0].strip()
         if name:
@@ -315,6 +334,7 @@ def generate_small_talk_response(
     message_text: str,
     user_memory: Optional[dict],
     recent_user_messages: Optional[list[str]] = None,
+    conversation_history: str = "",
 ) -> str:
     """Generate a casual, friend-like response without making factual claims."""
     text = (message_text or "").strip().lower()
@@ -338,6 +358,8 @@ def generate_small_talk_response(
 User message: "{message_text}"
 Style: {style_instructions}
 Vibe: {vibe_instructions}
+Conversation so far (last messages):
+{conversation_history}
 Optional follow-up: {like_hint}
 
 Return JSON:
@@ -370,7 +392,7 @@ Return JSON:
     return (result.get("type") or "general").strip()
 
 
-def generate_capabilities_response(message_text: str, user_memory: Optional[dict]) -> str:
+def generate_capabilities_response(message_text: str, user_memory: Optional[dict], conversation_history: str = "") -> str:
     """Generate a friendly capabilities response without hardcoding."""
     if settings.TEST_MODE:
         return "i'm your campus friend - i can find people, clubs, and events, answer campus qs, and ask around if i'm not sure."
@@ -380,6 +402,8 @@ Keep it short, casual, and confident. Mention: find people/clubs/events, answer 
 
 User message: "{message_text}"
 Style: {style_instructions}
+Conversation so far (last messages):
+{conversation_history}
 
 Return JSON:
 {{"message":"..."}}
