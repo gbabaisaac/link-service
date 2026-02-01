@@ -1140,6 +1140,21 @@ def start_outreach(
                 },
             },
         )
+        if requester_profile:
+            profile_metadata = build_card_metadata(requester_profile, "profile")
+            if profile_metadata:
+                db.insert_message(
+                    convo["id"],
+                    sender_id,
+                    requester_profile.get("full_name") or "Profile",
+                    profile_metadata,
+                )
+        db.insert_message(
+            convo["id"],
+            sender_id,
+            "would you want an intro? reply YES or NO.",
+            {"shareType": "text"},
+        )
         target_rows.append(
             {
                 "run_id": run["id"],
@@ -1281,6 +1296,21 @@ def collect_outreach(
                     dm_text,
                     {"shareType": "text", "requester_user_id": run.get("requester_user_id")},
                 )
+                if requester_profile:
+                    profile_metadata = build_card_metadata(requester_profile, "profile")
+                    if profile_metadata:
+                        db.insert_message(
+                            convo["id"],
+                            sender_id,
+                            requester_profile.get("full_name") or "Profile",
+                            profile_metadata,
+                        )
+                db.insert_message(
+                    convo["id"],
+                    sender_id,
+                    "would you want an intro? reply YES or NO.",
+                    {"shareType": "text"},
+                )
                 new_rows.append(
                     {
                         "run_id": run_id,
@@ -1330,6 +1360,21 @@ def collect_outreach(
                 if not convo:
                     continue
                 message = db.insert_message(convo["id"], sender_id, dm_text, {"shareType": "text"})
+                if requester_profile:
+                    profile_metadata = build_card_metadata(requester_profile, "profile")
+                    if profile_metadata:
+                        db.insert_message(
+                            convo["id"],
+                            sender_id,
+                            requester_profile.get("full_name") or "Profile",
+                            profile_metadata,
+                        )
+                db.insert_message(
+                    convo["id"],
+                    sender_id,
+                    "would you want an intro? reply YES or NO.",
+                    {"shareType": "text"},
+                )
                 new_rows.append(
                     {
                         "run_id": run_id,

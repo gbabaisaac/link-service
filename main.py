@@ -184,12 +184,12 @@ async def link_agent(request: LinkAgentRequest):
             mode = "agent"
         if mode == "conversation":
             lower = (request.message_text or "").lower()
+            profile = None
+            if request.access_token:
+                profile = db.get_profile_rls(request.access_token, request.user_id)
+            if not profile:
+                profile = db.get_profile(request.user_id, enforce_public=False)
             if any(x in lower for x in ["who am i", "do you know me", "what do you know about me"]):
-                profile = None
-                if request.access_token:
-                    profile = db.get_profile_rls(request.access_token, request.user_id)
-                if not profile:
-                    profile = db.get_profile(request.user_id, enforce_public=False)
                 if profile:
                     name = profile.get("full_name") or "friend"
                     username = profile.get("username")
@@ -211,6 +211,9 @@ async def link_agent(request: LinkAgentRequest):
                 reply = link_orchestrator.generate_small_talk_response(
                     request.message_text, user_memory
                 )
+                name = profile.get("full_name") if profile else None
+                if name:
+                    reply = f"yo {name.split()[0]} - {reply}"
             active_run = db.get_latest_active_outreach_run(request.user_id)
             if active_run and "status" in (active_run or {}):
                 # Light reminder without derailing the convo
