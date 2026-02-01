@@ -706,6 +706,13 @@ def build_outreach_message(
     requester_profile: Optional[dict] = None,
 ) -> str:
     """Prompt C - Outreach Message Generator."""
+    if settings.TEST_MODE:
+        topic = tags[0] if tags else "this"
+        name = requester_profile.get("full_name") if requester_profile else "a student"
+        return (
+            f"yo! quick q from Link - {name} asked about {topic}. "
+            "if you're down for an intro, reply YES. where'd you hear about it?"
+        )
     requester_text = ""
     if requester_profile:
         requester_text = (
@@ -715,7 +722,7 @@ def build_outreach_message(
             f"bio={requester_profile.get('bio')}, "
             f"interests={requester_profile.get('interests')}"
         )
-    prompt = f"""Write a short outreach DM to a student.
+    prompt = f"""Write a short outreach DM to a student. Sound like a Gen Z college friend: casual, warm, concise.
 
 Query: "{question}"
 Intent: {intent}
@@ -739,8 +746,8 @@ Return JSON:
         topic = tags[0] if tags else "this"
         name = requester_profile.get("full_name") if requester_profile else "a student"
         dm_text = (
-            f"hey! quick question from Link - {name} asked about {topic}. "
-            "if you're open to an intro, reply YES."
+            f"yo! quick q from Link - {name} asked about {topic}. "
+            "if you're down for an intro, reply YES."
         )
     if evidence_request:
         dm_text = f"{dm_text} {evidence_request}".strip()
@@ -751,6 +758,32 @@ Return JSON:
 
 def extract_and_rank_replies(replies: list[dict], original_query: str, style_instructions: str = "") -> dict:
     """Prompt D - Reply Extractor + Ranker."""
+    if settings.TEST_MODE:
+        first = replies[0] if replies else {}
+        return {
+            "extracted_claims": [
+                {
+                    "claim": first.get("text", ""),
+                    "event_name": None,
+                    "time": None,
+                    "location": None,
+                    "source": None,
+                    "mentioned_people": [],
+                    "confidence": 0.6,
+                }
+            ],
+            "ranked_results": [
+                {
+                    "result_summary": first.get("text", ""),
+                    "supporting_reply_ids": [first.get("message_id")] if first else [],
+                    "score": 0.6,
+                    "reasons": ["test_mode"],
+                }
+            ],
+            "final_answer_text": "I heard back from someone who said they're down. Want me to connect you?",
+            "confidence": 0.6,
+            "suggested_connection_user_id": first.get("user_id"),
+        }
     prompt = f"""You are Link. Extract claims and rank outreach replies. If a reply explicitly says they want to be connected, set suggested_connection_user_id to that user's id.
 
 Original query: "{original_query}"
