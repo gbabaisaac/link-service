@@ -4,6 +4,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from datetime import datetime
+from uuid import UUID
 
 from config import settings
 from schemas import (
@@ -41,6 +42,15 @@ app = FastAPI(
     description="Intelligent AI agent for campus communities",
     version="1.0.0",
 )
+
+def validate_uuid(value: str, field_name: str) -> None:
+    """Validate UUID input and raise 400 on failure."""
+    if value is None or value == "":
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    try:
+        UUID(str(value))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a valid UUID")
 
 
 @app.on_event("startup")
@@ -139,6 +149,8 @@ async def query(request: QueryRequest):
 async def link_agent(request: LinkAgentRequest):
     """Handle Link chat message with grounded answer or outreach."""
     try:
+        validate_uuid(request.user_id, "user_id")
+        validate_uuid(request.university_id, "university_id")
         convo = db.get_or_create_link_conversation(request.user_id)
         if not convo:
             raise HTTPException(status_code=404, detail="Link conversation not found")
@@ -554,9 +566,14 @@ async def connect_users(request: ConnectRequest):
 @app.post("/style/learn", response_model=StyleLearnResponse)
 async def learn_style(request: StyleLearnRequest):
     """Learn user's communication style from a message."""
+    validate_uuid(request.user_id, "user_id")
+    profile = db.get_profile(request.user_id, enforce_public=False) or {}
+    university_id = profile.get("university_id")
+    if not university_id:
+        raise HTTPException(status_code=400, detail="university_id is required")
     memory = link_orchestrator.update_user_style_memory(
         request.user_id,
-        (db.get_profile(request.user_id, enforce_public=False) or {}).get("university_id", ""),
+        university_id,
         request.message,
     )
     return StyleLearnResponse(
