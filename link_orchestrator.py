@@ -187,6 +187,7 @@ def update_conversation_state(state: dict, message_text: str) -> dict:
     topics = set(state.get("topics", []) or [])
     goals = set(state.get("goals", []) or [])
     classes = set(state.get("classes", []) or [])
+    memories = state.get("memories", []) or []
 
     for course in _extract_course_tags(message_text):
         classes.add(course)
@@ -206,9 +207,19 @@ def update_conversation_state(state: dict, message_text: str) -> dict:
     if any(x in text for x in ["looking for", "need", "help with", "trying to"]):
         goals.add(text[:80])
 
+    if "my name is " in text:
+        name = text.split("my name is ", 1)[-1].split(".")[0].strip()
+        if name:
+            memories.append(f"name:{name}")
+    if "i like " in text or "i love " in text or "i'm into " in text:
+        memories.append(f"likes:{text[:80]}")
+    if "i went to" in text or "i went" in text:
+        memories.append(f"event:{text[:80]}")
+
     state["topics"] = sorted(topics)
     state["goals"] = list(goals)[-5:]
     state["classes"] = sorted(classes)
+    state["memories"] = memories[-10:]
     state["last_message_at"] = _now_utc().isoformat()
     return state
 
@@ -1149,10 +1160,12 @@ def start_outreach(
                     requester_profile.get("full_name") or "Profile",
                     profile_metadata,
                 )
+        reason = question or "this"
         db.insert_message(
             convo["id"],
             sender_id,
-            "would you want an intro? reply YES or NO.",
+            f"{requester_profile.get('full_name') if requester_profile else 'Someone'} is looking for {reason}. "
+            "Want an intro? Reply YES or NO.",
             {"shareType": "text"},
         )
         target_rows.append(
@@ -1305,10 +1318,12 @@ def collect_outreach(
                             requester_profile.get("full_name") or "Profile",
                             profile_metadata,
                         )
+                reason = run.get("query") or "this"
                 db.insert_message(
                     convo["id"],
                     sender_id,
-                    "would you want an intro? reply YES or NO.",
+                    f"{requester_profile.get('full_name') if requester_profile else 'Someone'} is looking for {reason}. "
+                    "Want an intro? Reply YES or NO.",
                     {"shareType": "text"},
                 )
                 new_rows.append(
@@ -1369,10 +1384,12 @@ def collect_outreach(
                             requester_profile.get("full_name") or "Profile",
                             profile_metadata,
                         )
+                reason = run.get("query") or "this"
                 db.insert_message(
                     convo["id"],
                     sender_id,
-                    "would you want an intro? reply YES or NO.",
+                    f"{requester_profile.get('full_name') if requester_profile else 'Someone'} is looking for {reason}. "
+                    "Want an intro? Reply YES or NO.",
                     {"shareType": "text"},
                 )
                 new_rows.append(

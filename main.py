@@ -189,6 +189,7 @@ async def link_agent(request: LinkAgentRequest):
                 profile = db.get_profile_rls(request.access_token, request.user_id)
             if not profile:
                 profile = db.get_profile(request.user_id, enforce_public=False)
+            active_run = db.get_latest_active_outreach_run(request.user_id)
             if any(x in lower for x in ["who am i", "do you know me", "what do you know about me"]):
                 if profile:
                     name = profile.get("full_name") or "friend"
@@ -207,6 +208,11 @@ async def link_agent(request: LinkAgentRequest):
                     reply = "i know that " + " ".join(summary_parts) + "."
                 else:
                     reply = "i don't see your profile yet — want to fill it in?"
+            elif "what are you asking" in lower or "what are you asking them" in lower:
+                if active_run and active_run.get("query"):
+                    reply = f"i'm asking about: \"{active_run.get('query')}\" — want me to check in?"
+                else:
+                    reply = "no active asks right now — want me to find something?"
             else:
                 reply = link_orchestrator.generate_small_talk_response(
                     request.message_text, user_memory
@@ -214,10 +220,15 @@ async def link_agent(request: LinkAgentRequest):
                 name = profile.get("full_name") if profile else None
                 if name:
                     reply = f"yo {name.split()[0]} - {reply}"
-            active_run = db.get_latest_active_outreach_run(request.user_id)
-            if active_run and "status" in (active_run or {}):
-                # Light reminder without derailing the convo
-                reply = f"{reply} btw i'm still asking a few people — want me to check in?"
+                memories = (user_memory or {}).get("conversation_state", {}).get("memories") or []
+                for mem in reversed(memories):
+                    if mem.startswith("name:"):
+                        remembered = mem.split("name:", 1)[-1].strip()
+                        if remembered:
+                            reply = f"yo {remembered.title()} - {reply}"
+                            break
+            if active_run and active_run.get("query") and "what are you asking" not in lower:
+                reply = f"{reply} btw i'm still asking about \"{active_run.get('query')}\" — want me to check in?"
             link_orchestrator.insert_link_response(
                 convo["id"],
                 request.university_id,
@@ -340,6 +351,12 @@ async def link_agent(request: LinkAgentRequest):
                 "user_ids": [cid for cid in cards.get("user_ids", []) if cid in valid_user_ids],
                 "club_ids": [cid for cid in cards.get("club_ids", []) if cid in valid_club_ids],
             }
+            more_options = False
+            if intent.get("intent") == "person_search":
+                all_people = [p.get("id") for p in records.get("profiles", []) if p.get("id")]
+                if len(all_people) > 2:
+                    cards["user_ids"] = (cards.get("user_ids") or all_people)[:2]
+                    more_options = True
             link_orchestrator.insert_link_response(
                 convo["id"],
                 request.university_id,
@@ -349,6 +366,16 @@ async def link_agent(request: LinkAgentRequest):
                 confidence=confidence,
                 session_id=session["id"] if session else None,
             )
+            if more_options:
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    "i found a couple options — want more?",
+                    citations=[],
+                    cards={},
+                    confidence=0.4,
+                    session_id=session["id"] if session else None,
+                )
             link_orchestrator.write_verified_facts_from_records(
                 request.university_id,
                 records,
