@@ -307,6 +307,33 @@ async def link_agent(request: LinkAgentRequest):
                 access_token=request.access_token,
             )
             db_answerable = bool(pre_records.get("profiles"))
+        elif intent_result.intent in {
+            Intent.CLUB_SEARCH,
+            Intent.EVENT_SEARCH,
+            Intent.CAMPUS_INFO,
+            Intent.DB_QUERY,
+            Intent.COUNT_QUERY,
+            Intent.FOOD,
+            Intent.HOUSING,
+            Intent.TECH,
+            Intent.SAFETY,
+            Intent.TRANSPORT,
+            Intent.HEALTH,
+            Intent.CAREER,
+            Intent.SPORTS,
+            Intent.STUDY,
+            Intent.SOCIAL,
+            Intent.MARKETPLACE,
+        }:
+            pre_records = link_orchestrator.retrieve_candidates(
+                intent_map.get(intent_result.intent, "campus_info"),
+                intent_result.entities,
+                None,
+                request.university_id,
+                access_token=request.access_token,
+            )
+            # Avoid outreach for non-people intents; stay in conversation mode.
+            db_answerable = True
         transition = determine_transition(
             convo_state.get("mode") or "idle",
             intent_result,
@@ -328,6 +355,7 @@ async def link_agent(request: LinkAgentRequest):
             profile = user_context.get("profile") if user_context else None
             prefs = (user_memory or {}).get("known_preferences") or {}
             preferred = prefs.get("preferred_name")
+            likes = prefs.get("likes") or []
             name = preferred or (profile.get("full_name") if profile else None) or "friend"
             major = profile.get("major") if profile else None
             interests = profile.get("interests") or []
@@ -338,6 +366,8 @@ async def link_agent(request: LinkAgentRequest):
                 parts.append(f"{major} major")
             if interests:
                 parts.append(f"into {', '.join(interests[:3])}")
+            if likes and not interests:
+                parts.append(f"you like {likes[0]}")
             reply = ", ".join(parts) + ". want me to update anything?"
             link_orchestrator.insert_link_response(
                 convo["id"],
@@ -644,6 +674,45 @@ async def link_agent(request: LinkAgentRequest):
                 task=None,
                 ui=build_ui_hints("conversation", None),
             )
+        # If it's a non-people query and we didn't find anything, ask to clarify rather than outreach.
+        if intent_result.intent in {
+            Intent.CLUB_SEARCH,
+            Intent.EVENT_SEARCH,
+            Intent.CAMPUS_INFO,
+            Intent.DB_QUERY,
+            Intent.COUNT_QUERY,
+            Intent.FOOD,
+            Intent.HOUSING,
+            Intent.TECH,
+            Intent.SAFETY,
+            Intent.TRANSPORT,
+            Intent.HEALTH,
+            Intent.CAREER,
+            Intent.SPORTS,
+            Intent.STUDY,
+            Intent.SOCIAL,
+            Intent.MARKETPLACE,
+        }:
+            reply = "i don't see that in campus data yet. want me to ask around?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                reply,
+                citations=[],
+                cards={},
+                confidence=0.4,
+                session_id=session["id"] if session else None,
+                task_state="clarifying",
+            )
+            resolve_task_state(convo_state, "resolved", query=request.message_text)
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.4,
+                answer_text=reply,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
 
         capability = link_orchestrator.route_capability(request.message_text, intent)
 
@@ -670,7 +739,7 @@ async def link_agent(request: LinkAgentRequest):
                     reply = f"gotchu. i'll call you {preferred}."
                 else:
                     reply = "gotchu. what should i call you?"
-            elif any(x in lower for x in ["who am i", "do you know me", "what do you know about me"]):
+            elif any(x in lower for x in ["who am i", "do you know me", "what do you know about me", "tell me about myself", "about myself"]):
                 if profile:
                     display = get_display_name(profile, user_memory) or "friend"
                     username = profile.get("username")
@@ -1061,6 +1130,28 @@ async def link_agent(request: LinkAgentRequest):
                 citations=[],
                 task=build_task_state(active_task),
                 ui=build_ui_hints("agent", active_task),
+            )
+
+        if intent_result.intent != Intent.PEOPLE_SEARCH:
+            clarifying = "i don't see that in campus data yet. want me to ask around?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                clarifying,
+                citations=[],
+                cards={},
+                confidence=0.4,
+                session_id=session["id"] if session else None,
+                task_state="clarifying",
+            )
+            resolve_task_state(convo_state, "resolved", query=request.message_text)
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.4,
+                answer_text=clarifying,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
             )
 
         outreach = link_orchestrator.start_outreach(

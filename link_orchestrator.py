@@ -155,6 +155,23 @@ def update_user_style_memory(user_id: str, university_id: str, message_text: str
         "conversation_state": conversation_state,
     }
     known_preferences = existing.get("known_preferences") or {}
+    lower_text = (message_text or "").lower()
+    like_seed = None
+    if any(x in lower_text for x in ["i like ", "i love ", "i'm into "]):
+        like_seed = lower_text.split("i like ", 1)[-1]
+        like_seed = like_seed.split("i love ", 1)[-1]
+        like_seed = like_seed.split("i'm into ", 1)[-1]
+    elif "remember i said" in lower_text:
+        like_seed = lower_text.split("remember i said", 1)[-1]
+    if like_seed:
+        like_seed = like_seed.strip().strip(".")
+        likes = known_preferences.get("likes") or []
+        for part in re.split(r",| and |/|&", like_seed):
+            value = part.strip()
+            if value and value not in likes:
+                likes.append(value)
+        if likes:
+            known_preferences["likes"] = likes[-5:]
     preferred_name = conversation_state.get("preferred_name")
     if preferred_name:
         known_preferences["preferred_name"] = preferred_name
@@ -251,6 +268,8 @@ def update_conversation_state(state: dict, message_text: str) -> dict:
         memories.append(f"likes:{text[:80]}")
     if "i went to" in text or "i went" in text:
         memories.append(f"event:{text[:80]}")
+    if "remember i said" in text or "remember that i" in text:
+        memories.append(f"remember:{text[:80]}")
 
     state["topics"] = sorted(topics)
     state["goals"] = list(goals)[-5:]
