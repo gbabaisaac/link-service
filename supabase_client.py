@@ -85,7 +85,7 @@ def get_profile_rls(access_token: str, user_id: str) -> Optional[dict]:
 
 def get_user_context_rls(access_token: str, user_id: str) -> dict:
     """Fetch user profile + classes + clubs with RLS (best effort)."""
-    client = get_rls_client(access_token)
+    client = get_supabase_client_for_user(access_token)
     profile = (
         client.table("profiles")
         .select("*")
