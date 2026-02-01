@@ -1,0 +1,1344 @@
+"""Link Orchestrator - intent routing, grounded answers, outreach flows."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import re
+from typing import Optional
+
+from config import settings
+from link_logic import llm_json, normalize_entities, build_card_metadata
+import outreach_logic
+import supabase_client as db
+
+INTENT_TYPES = {
+    "event_search",
+    "person_search",
+    "club_search",
+    "campus_info",
+    "casual_chat",
+}
+
+TIME_WINDOWS = {"today", "this_week", None}
+
+SLANG_TERMS = {
+    "fr", "frfr", "ngl", "tbh", "lowkey", "highkey", "rn", "idk", "idc", "imo",
+    "lmk", "brb", "btw", "omg", "lol", "lmao", "lmfao", "wtf", "vibe", "vibes",
+    "bet", "cap", "nocap", "deadass", "slay", "ate", "goated", "rizz", "sus",
+}
+
+EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\u2600-\u26FF"
+    "\u2700-\u27BF"
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _avg(prev: float, new: float, count: int) -> float:
+    return (prev * count + new) / max(count + 1, 1)
+
+
+def analyze_message_style(text: str) -> dict:
+    """Extract lightweight style features from a message."""
+    raw = text or ""
+    lowered = raw.lower()
+    words = re.findall(r"[a-zA-Z0-9']+", raw)
+    sentences = [s for s in re.split(r"[.!?]+", raw) if s.strip()]
+    alpha_chars = [c for c in raw if c.isalpha()]
+    upper_chars = [c for c in alpha_chars if c.isupper()]
+    lower_chars = [c for c in alpha_chars if c.islower()]
+
+    emoji_count = len(EMOJI_RE.findall(raw))
+    slang_terms = sorted({term for term in SLANG_TERMS if term in lowered})
+
+    avg_words = len(words) / max(len(sentences), 1)
+    avg_word_len = sum(len(w) for w in words) / max(len(words), 1)
+    punctuation_count = len(re.findall(r"[.!?]", raw))
+    exclamation_count = raw.count("!")
+    question_count = raw.count("?")
+    lower_ratio = len(lower_chars) / max(len(alpha_chars), 1)
+    upper_ratio = len(upper_chars) / max(len(alpha_chars), 1)
+    emoji_rate = emoji_count / max(len(words), 1)
+    has_elongation = bool(re.search(r"(\\w)\\1{2,}", lowered))
+
+    return {
+        "avg_words_per_sentence": round(avg_words, 2),
+        "avg_word_length": round(avg_word_len, 2),
+        "emoji_count": emoji_count,
+        "emoji_rate": round(emoji_rate, 3),
+        "punctuation_count": punctuation_count,
+        "exclamation_count": exclamation_count,
+        "question_count": question_count,
+        "lowercase_ratio": round(lower_ratio, 3),
+        "uppercase_ratio": round(upper_ratio, 3),
+        "slang_terms": slang_terms,
+        "has_elongation": has_elongation,
+        "raw_length": len(raw),
+        "word_count": len(words),
+    }
+
+
+def update_user_style_memory(user_id: str, university_id: str, message_text: str) -> dict:
+    """Update user memory with style profile + Gen Z baseline."""
+    existing = db.get_user_memory(user_id) or {}
+    detected = existing.get("detected_style") or {}
+    vocab = existing.get("vocabulary_patterns") or {}
+    examples = existing.get("style_examples") or []
+
+    features = analyze_message_style(message_text)
+    count = int(existing.get("messages_analyzed") or 0)
+
+    merged = {
+        "avg_words_per_sentence": round(_avg(float(detected.get("avg_words_per_sentence", 0)), features["avg_words_per_sentence"], count), 2),
+        "avg_word_length": round(_avg(float(detected.get("avg_word_length", 0)), features["avg_word_length"], count), 2),
+        "emoji_rate": round(_avg(float(detected.get("emoji_rate", 0)), features["emoji_rate"], count), 3),
+        "punctuation_rate": round(_avg(float(detected.get("punctuation_rate", 0)), features["punctuation_count"], count), 2),
+        "exclamation_rate": round(_avg(float(detected.get("exclamation_rate", 0)), features["exclamation_count"], count), 2),
+        "question_rate": round(_avg(float(detected.get("question_rate", 0)), features["question_count"], count), 2),
+        "lowercase_ratio": round(_avg(float(detected.get("lowercase_ratio", 0)), features["lowercase_ratio"], count), 3),
+        "uppercase_ratio": round(_avg(float(detected.get("uppercase_ratio", 0)), features["uppercase_ratio"], count), 3),
+        "has_elongation": detected.get("has_elongation", False) or features["has_elongation"],
+    }
+
+    slang = set(vocab.get("common_slang") or [])
+    slang.update(features["slang_terms"])
+
+    examples = (examples + [message_text])[-5:]
+
+    style_confidence = min(1.0, (count + 1) / 10.0)
+
+    payload = {
+        "university_id": university_id,
+        "last_interaction_at": "now()",
+        "messages_analyzed": count + 1,
+        "communication_archetype": "genz_casual",
+        "style_confidence": style_confidence,
+        "detected_style": merged,
+        "vocabulary_patterns": {"common_slang": sorted(slang)},
+        "style_examples": examples,
+    }
+    known_preferences = existing.get("known_preferences")
+    if known_preferences is not None:
+        payload["known_preferences"] = known_preferences
+
+    return db.upsert_user_memory(user_id, payload)
+
+
+def build_style_instructions(user_memory: Optional[dict]) -> str:
+    """Build style guidance for responses (Gen Z baseline + user mirroring)."""
+    baseline = (
+        "Write like a Gen Z college student. Be casual, concise, friendly. "
+        "Use contractions and avoid formal phrasing."
+    )
+    if not user_memory:
+        return baseline + " Keep it short with light punctuation and 0-2 emojis."
+
+    detected = user_memory.get("detected_style") or {}
+    vocab = user_memory.get("vocabulary_patterns") or {}
+    slang = vocab.get("common_slang") or []
+    avg_words = detected.get("avg_words_per_sentence")
+    emoji_rate = detected.get("emoji_rate")
+    lower_ratio = detected.get("lowercase_ratio", 0)
+    casing = "mostly lowercase" if lower_ratio >= 0.7 else "mixed case"
+    slang_hint = f"Use some of these terms if natural: {', '.join(slang[:6])}." if slang else ""
+    length_hint = f"Aim for about {int(avg_words)} words per sentence." if avg_words else "Keep sentences short."
+    emoji_hint = (
+        f"Emoji rate ~{emoji_rate} per word; use 0-2 emojis max."
+        if emoji_rate is not None
+        else "Use 0-2 emojis max."
+    )
+    return " ".join([baseline, f"Mirror the user's style: {casing}.", length_hint, emoji_hint, slang_hint]).strip()
+
+
+def _matches_tags(text: str, tags: list[str]) -> bool:
+    if not tags:
+        return True
+    haystack = (text or "").lower()
+    return any(tag in haystack for tag in tags)
+
+
+def route_intent(message_text: str, user_context: Optional[dict] = None) -> dict:
+    """Prompt A - Intent Router."""
+    context = ""
+    if user_context:
+        context = f"User context: {user_context}"
+
+    prompt = f"""Analyze this user message and return structured intent.
+
+User message: "{message_text}"
+{context}
+
+Output JSON with:
+- intent: event_search | person_search | club_search | campus_info | casual_chat
+- tags: string[]
+- time_window: today | this_week | null
+- needs_outreach: boolean
+"""
+
+    result = llm_json(prompt, temperature=0)
+
+    intent = (result.get("intent") or "").strip()
+    if intent not in INTENT_TYPES:
+        intent = _fallback_intent(message_text)
+
+    tags = result.get("tags") or []
+    tags = [t.strip().lower() for t in tags if isinstance(t, str) and t.strip()]
+    tags = normalize_entities(tags)
+
+    time_window = result.get("time_window")
+    if time_window not in {"today", "this_week"}:
+        time_window = None
+
+    needs_outreach = bool(result.get("needs_outreach", False))
+
+    return {
+        "intent": intent,
+        "tags": tags,
+        "time_window": time_window,
+        "needs_outreach": needs_outreach,
+    }
+
+
+def _fallback_intent(message_text: str) -> str:
+    text = (message_text or "").lower()
+    if any(x in text for x in ["club", "organization", "org"]):
+        return "club_search"
+    if any(x in text for x in ["event", "happening", "tonight", "this week", "today"]):
+        return "event_search"
+    if any(x in text for x in ["who", "anyone", "person", "people", "connect me"]):
+        return "person_search"
+    if any(x in text for x in ["where", "when", "what time", "info"]):
+        return "campus_info"
+    return "casual_chat"
+
+
+def _filter_events(events: list[dict], tags: list[str], time_window: Optional[str]) -> list[dict]:
+    now = _now_utc()
+    if time_window == "today":
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+    elif time_window == "this_week":
+        start = now
+        end = now + timedelta(days=7)
+    else:
+        start = None
+        end = None
+
+    filtered: list[dict] = []
+    for event in events:
+        start_at = _parse_dt(event.get("start_at"))
+        if start and end and start_at:
+            if not (start <= start_at <= end):
+                continue
+        text = " ".join([
+            event.get("title") or "",
+            event.get("description") or "",
+            event.get("type") or "",
+            event.get("location_name") or "",
+        ])
+        if _matches_tags(text, tags):
+            filtered.append(event)
+    return filtered
+
+
+def _filter_profiles(profiles: list[dict], tags: list[str]) -> list[dict]:
+    filtered: list[dict] = []
+    for profile in profiles:
+        interests = profile.get("interests") or []
+        if isinstance(interests, str):
+            interests = [interests]
+        text = " ".join([
+            profile.get("full_name") or "",
+            profile.get("username") or "",
+            profile.get("major") or "",
+            profile.get("bio") or "",
+            " ".join([str(i) for i in interests]),
+        ])
+        if _matches_tags(text, tags):
+            filtered.append(profile)
+    return filtered
+
+
+def _filter_orgs(orgs: list[dict], tags: list[str]) -> list[dict]:
+    filtered: list[dict] = []
+    for org in orgs:
+        text = " ".join([
+            org.get("name") or "",
+            org.get("category") or "",
+            org.get("mission_statement") or "",
+            org.get("meeting_place") or "",
+        ])
+        if _matches_tags(text, tags):
+            filtered.append(org)
+    return filtered
+
+
+def retrieve_candidates(
+    intent: str,
+    tags: list[str],
+    time_window: Optional[str],
+    university_id: str,
+    access_token: Optional[str] = None,
+) -> dict:
+    """Pull relevant records from the Bonded DB."""
+    events: list[dict] = []
+    profiles: list[dict] = []
+    orgs: list[dict] = []
+    facts: list[dict] = []
+
+    facts = lookup_verified_facts(university_id, tags)
+
+    if intent in {"event_search", "campus_info"}:
+        if access_token:
+            events = db.get_upcoming_events_rls(access_token, university_id, limit=100)
+        else:
+            events = db.get_upcoming_events(university_id, limit=100)
+        events = _filter_events(events, tags, time_window)[:10]
+
+    if intent in {"person_search"}:
+        if access_token:
+            profiles = db.get_profiles_rls(access_token, university_id, limit=200)
+        else:
+            profiles = db.get_profiles(university_id, limit=200)
+        profiles = _filter_profiles(profiles, tags)[:10]
+
+    if intent in {"club_search", "campus_info"}:
+        if access_token:
+            orgs = db.get_organizations_rls(access_token, university_id, limit=200)
+        else:
+            orgs = db.get_organizations(university_id, limit=200)
+        orgs = _filter_orgs(orgs, tags)[:10]
+
+    return {
+        "events": events,
+        "profiles": profiles,
+        "orgs": orgs,
+        "facts": facts,
+    }
+
+
+def _record_summaries(records: dict) -> list[dict]:
+    summaries: list[dict] = []
+    for fact in records.get("facts", []):
+        summaries.append(
+            {
+                "type": "verified_fact",
+                "id": fact.get("id"),
+                "fact_category": fact.get("fact_category"),
+                "fact_key": fact.get("fact_key"),
+                "fact_value": fact.get("fact_value"),
+                "confidence": fact.get("confidence"),
+                "entity_id": fact.get("entity_id"),
+                "entity_type": fact.get("entity_type"),
+                "verified_at": fact.get("verified_at"),
+            }
+        )
+    for event in records.get("events", []):
+        summaries.append(
+            {
+                "type": "event",
+                "id": event.get("id"),
+                "title": event.get("title"),
+                "start_at": event.get("start_at"),
+                "location": event.get("location_name"),
+                "description": event.get("description"),
+            }
+        )
+    for profile in records.get("profiles", []):
+        summaries.append(
+            {
+                "type": "user",
+                "id": profile.get("id"),
+                "name": profile.get("full_name"),
+                "major": profile.get("major"),
+                "bio": profile.get("bio"),
+                "interests": profile.get("interests"),
+            }
+        )
+    for org in records.get("orgs", []):
+        summaries.append(
+            {
+                "type": "club",
+                "id": org.get("id"),
+                "name": org.get("name"),
+                "category": org.get("category"),
+                "meeting_time": org.get("meeting_time"),
+                "meeting_place": org.get("meeting_place"),
+            }
+        )
+    return summaries
+
+
+def lookup_verified_facts(university_id: str, tags: list[str], limit: int = 10) -> list[dict]:
+    """Fetch unexpired verified facts for reuse."""
+    now = _now_utc()
+    try:
+        db.delete_expired_verified_facts(now.isoformat())
+    except Exception:
+        pass
+    facts = db.get_verified_facts(university_id, tags, limit=limit)
+    filtered: list[dict] = []
+    for fact in facts:
+        expires_at = _parse_dt(fact.get("expires_at"))
+        if expires_at and expires_at < now:
+            continue
+        filtered.append(fact)
+    return filtered
+
+
+def compose_cached_answer(question: str, facts: list[dict], style_instructions: str = "") -> dict:
+    """Compose answer from verified facts cache only."""
+    prompt = f"""You are Link. You MUST ONLY use the provided verified facts. If insufficient, say needs_outreach.
+
+User question: "{question}"
+Style: {style_instructions}
+
+Verified facts:
+{facts}
+
+Return JSON:
+{{
+  "answer_mode": "direct" | "needs_outreach" | "ask_clarifying",
+  "confidence": number,
+  "answer_text": string,
+  "citations": [{{"type":"verified_fact", "id":"..."}}]
+}}
+"""
+    result = llm_json(prompt, temperature=0)
+    answer_mode = result.get("answer_mode") or "needs_outreach"
+    if answer_mode not in {"direct", "needs_outreach", "ask_clarifying"}:
+        answer_mode = "needs_outreach"
+    confidence = float(result.get("confidence") or 0.0)
+    answer_text = result.get("answer_text") or ""
+    citations = result.get("citations") or []
+    return {
+        "answer_mode": answer_mode,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "answer_text": answer_text,
+        "citations": citations,
+    }
+
+
+def validate_cached_citations(citations: list[dict], facts: list[dict]) -> bool:
+    fact_ids = {f.get("id") for f in facts if f.get("id")}
+    for c in citations or []:
+        if c.get("type") != "verified_fact":
+            return False
+        if c.get("id") not in fact_ids:
+            return False
+    return True
+
+
+def validate_record_citations(citations: list[dict], records: dict) -> bool:
+    valid_event_ids = {e.get("id") for e in records.get("events", []) if e.get("id")}
+    valid_user_ids = {p.get("id") for p in records.get("profiles", []) if p.get("id")}
+    valid_club_ids = {o.get("id") for o in records.get("orgs", []) if o.get("id")}
+    for c in citations or []:
+        c_type = c.get("type")
+        c_id = c.get("id")
+        if c_type == "event" and c_id in valid_event_ids:
+            continue
+        if c_type == "user" and c_id in valid_user_ids:
+            continue
+        if c_type == "club" and c_id in valid_club_ids:
+            continue
+        return False
+    return True
+
+
+def _expires_in_days(days: int) -> str:
+    return (_now_utc() + timedelta(days=days)).isoformat()
+
+
+def select_forum_for_post(access_token: str, university_id: str) -> Optional[dict]:
+    """Pick a campus/public forum the user can post to."""
+    forums = db.list_forums_rls(access_token, university_id=university_id, limit=50)
+    for forum in forums:
+        if forum.get("is_public") and forum.get("type") in {"campus", "public"}:
+            return forum
+    return forums[0] if forums else None
+
+
+def create_forum_post(
+    access_token: str,
+    university_id: str,
+    user_id: str,
+    question: str,
+    tags: list[str],
+) -> Optional[dict]:
+    """Create an anonymous forum post for outreach fallback."""
+    forum = select_forum_for_post(access_token, university_id)
+    if not forum:
+        return None
+    title = "Looking for people to connect"
+    if tags:
+        title = f"Anyone into {tags[0]}?"
+    body = (
+        f"Hey! I'm looking for people who are into {', '.join(tags) if tags else 'this'}. "
+        "If that's you, drop a comment!"
+    )
+    payload = {
+        "forum_id": forum.get("id"),
+        "user_id": user_id,
+        "title": title,
+        "body": body,
+        "tags": tags or [],
+        "is_anonymous": True,
+    }
+    post = db.create_post_rls(access_token, payload)
+    return {"forum": forum, "post": post}
+
+
+def write_verified_facts_from_records(
+    university_id: str,
+    records: dict,
+    citations: list[dict],
+    answer_text: str,
+    confidence: float,
+) -> None:
+    """Cache verified facts based on DB-backed answers."""
+    if confidence < settings.CONFIDENCE_THRESHOLD:
+        return
+    events_by_id = {e.get("id"): e for e in records.get("events", []) if e.get("id")}
+    profiles_by_id = {p.get("id"): p for p in records.get("profiles", []) if p.get("id")}
+    orgs_by_id = {o.get("id"): o for o in records.get("orgs", []) if o.get("id")}
+
+    for citation in citations:
+        c_type = citation.get("type")
+        c_id = citation.get("id")
+        if c_type == "event" and c_id in events_by_id:
+            event = events_by_id[c_id]
+            fact_value = f"{event.get('title')} at {event.get('location_name')} on {event.get('start_at')}"
+            expires_at = None
+            start_at = _parse_dt(event.get("start_at"))
+            if start_at:
+                expires_at = (start_at + timedelta(days=7)).isoformat()
+            db.create_verified_fact(
+                {
+                    "university_id": university_id,
+                    "entity_type": "event",
+                    "entity_id": c_id,
+                    "fact_category": "event",
+                    "fact_key": "event_details",
+                    "fact_value": fact_value,
+                    "confidence": confidence,
+                    "source_type": "db_record",
+                    "source_id": c_id,
+                    "consent_status": "opt_in",
+                    "verified_at": _now_utc().isoformat(),
+                    "expires_at": expires_at or _expires_in_days(30),
+                }
+            )
+        if c_type == "user" and c_id in profiles_by_id:
+            profile = profiles_by_id[c_id]
+            interests = profile.get("interests") or []
+            if isinstance(interests, str):
+                interests = [interests]
+            fact_value = f"{profile.get('full_name')} - {profile.get('major')} - interests: {', '.join(interests)}"
+            db.create_verified_fact(
+                {
+                    "university_id": university_id,
+                    "entity_type": "profile",
+                    "entity_id": c_id,
+                    "fact_category": "profile",
+                    "fact_key": "profile_summary",
+                    "fact_value": fact_value,
+                    "confidence": confidence,
+                    "source_type": "db_record",
+                    "source_id": c_id,
+                    "consent_status": "opt_in",
+                    "verified_at": _now_utc().isoformat(),
+                    "expires_at": _expires_in_days(180),
+                }
+            )
+        if c_type == "club" and c_id in orgs_by_id:
+            org = orgs_by_id[c_id]
+            fact_value = f"{org.get('name')} - {org.get('meeting_time')} at {org.get('meeting_place')}"
+            db.create_verified_fact(
+                {
+                    "university_id": university_id,
+                    "entity_type": "organization",
+                    "entity_id": c_id,
+                    "fact_category": "club",
+                    "fact_key": "club_details",
+                    "fact_value": fact_value,
+                    "confidence": confidence,
+                    "source_type": "db_record",
+                    "source_id": c_id,
+                    "consent_status": "opt_in",
+                    "verified_at": _now_utc().isoformat(),
+                    "expires_at": _expires_in_days(180),
+                }
+            )
+
+
+def write_verified_fact_from_outreach(
+    university_id: str,
+    run_id: str,
+    answer_text: str,
+    confidence: float,
+    result_summary: Optional[str] = None,
+) -> None:
+    """Cache outreach-verified result summary."""
+    if confidence < settings.OUTREACH_CONFIDENCE_THRESHOLD:
+        return
+    fact_value = result_summary or answer_text
+    db.create_verified_fact(
+        {
+            "university_id": university_id,
+            "entity_type": "outreach",
+            "entity_id": None,
+            "fact_category": "outreach",
+            "fact_key": "outreach_summary",
+            "fact_value": fact_value,
+            "confidence": confidence,
+            "source_type": "outreach_reply",
+            "source_id": run_id,
+            "consent_status": "opt_in",
+            "verified_at": _now_utc().isoformat(),
+            "expires_at": _expires_in_days(14),
+        }
+    )
+
+
+def compute_db_confidence(records: dict, tags: list[str], time_window: Optional[str]) -> float:
+    """Simple deterministic confidence score for DB-based answers."""
+    summaries = _record_summaries(records)
+    if not summaries:
+        return 0.1
+
+    max_overlap = 0.0
+    completeness = 0.0
+    for item in summaries:
+        text = " ".join([str(v or "") for v in item.values()]).lower()
+        if tags:
+            overlap = sum(1 for t in tags if t in text) / max(len(tags), 1)
+        else:
+            overlap = 0.4
+        max_overlap = max(max_overlap, overlap)
+
+        if item.get("type") == "event":
+            has_time = bool(item.get("start_at"))
+            has_location = bool(item.get("location"))
+            completeness = max(completeness, 0.2 + 0.4 * int(has_time) + 0.4 * int(has_location))
+        else:
+            completeness = max(completeness, 0.6)
+
+    corroboration = min(0.2, 0.05 * max(len(summaries) - 1, 0))
+    score = 0.4 + 0.4 * max_overlap + 0.2 * completeness + corroboration
+    return max(0.1, min(0.95, score))
+
+
+def compose_grounded_answer(question: str, records: dict, style_instructions: str = "") -> dict:
+    """Prompt B - Grounded Answer Composer."""
+    summaries = _record_summaries(records)
+    prompt = f"""You are Link. You MUST ONLY use the provided records. If they are insufficient, choose needs_outreach or ask_clarifying.
+
+User question: "{question}"
+Style: {style_instructions}
+
+Records (IDs and key fields):
+{summaries}
+
+Return JSON:
+{{
+  "answer_mode": "direct" | "needs_outreach" | "ask_clarifying",
+  "confidence": number,
+  "answer_text": string,
+  "cards": {{"event_ids"?:[], "user_ids"?:[], "club_ids"?:[]}},
+  "citations": [{{"type":"event"|"user"|"club", "id":"..."}}],
+  "why": string
+}}
+"""
+
+    result = llm_json(prompt, temperature=0)
+
+    answer_mode = result.get("answer_mode") or "needs_outreach"
+    if answer_mode not in {"direct", "needs_outreach", "ask_clarifying"}:
+        answer_mode = "needs_outreach"
+
+    confidence = float(result.get("confidence") or 0.0)
+    answer_text = result.get("answer_text") or ""
+    cards = result.get("cards") or {}
+    citations = result.get("citations") or []
+
+    return {
+        "answer_mode": answer_mode,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "answer_text": answer_text,
+        "cards": cards,
+        "citations": citations,
+        "why": result.get("why") or "",
+    }
+
+
+def build_outreach_message(
+    question: str,
+    intent: str,
+    tags: list[str],
+    style_instructions: str = "",
+    requester_profile: Optional[dict] = None,
+) -> str:
+    """Prompt C - Outreach Message Generator."""
+    requester_text = ""
+    if requester_profile:
+        requester_text = (
+            f"Requester profile (public): name={requester_profile.get('full_name')}, "
+            f"username={requester_profile.get('username')}, "
+            f"major={requester_profile.get('major')}, "
+            f"bio={requester_profile.get('bio')}, "
+            f"interests={requester_profile.get('interests')}"
+        )
+    prompt = f"""Write a short outreach DM to a student.
+
+Query: "{question}"
+Intent: {intent}
+Tags: {tags}
+{requester_text}
+Style: {style_instructions}
+
+Return JSON:
+{{
+  "dm_text": "...",
+  "evidence_request": "Where did you hear this?",
+  "questions": ["..."]
+}}
+"""
+    result = llm_json(prompt, temperature=0)
+    dm_text = (result.get("dm_text") or "").strip()
+    evidence_request = (result.get("evidence_request") or "").strip()
+    questions = result.get("questions") or []
+
+    if not dm_text:
+        topic = tags[0] if tags else "this"
+        name = requester_profile.get("full_name") if requester_profile else "a student"
+        dm_text = (
+            f"hey! quick question from Link - {name} asked about {topic}. "
+            "if you're open to an intro, reply YES."
+        )
+    if evidence_request:
+        dm_text = f"{dm_text} {evidence_request}".strip()
+    if questions:
+        dm_text = f"{dm_text} {' '.join(q.strip() for q in questions if q)}".strip()
+    return dm_text
+
+
+def extract_and_rank_replies(replies: list[dict], original_query: str, style_instructions: str = "") -> dict:
+    """Prompt D - Reply Extractor + Ranker."""
+    prompt = f"""You are Link. Extract claims and rank outreach replies. If a reply explicitly says they want to be connected, set suggested_connection_user_id to that user's id.
+
+Original query: "{original_query}"
+Style: {style_instructions}
+
+Replies (user_id, message_id, text):
+{replies}
+
+Return JSON:
+{{
+  "extracted_claims": [{{"claim":"...","event_name":null,"time":null,"location":null,"source":null,"mentioned_people":[],"confidence":0.0}}],
+  "ranked_results": [{{"result_summary":"...","supporting_reply_ids":[],"score":0.0,"reasons":[]}}],
+  "final_answer_text": "...",
+  "confidence": 0.0,
+  "suggested_connection_user_id": null
+}}
+"""
+
+    result = llm_json(prompt, temperature=0)
+    return {
+        "extracted_claims": result.get("extracted_claims") or [],
+        "ranked_results": result.get("ranked_results") or [],
+        "final_answer_text": result.get("final_answer_text") or "",
+        "confidence": float(result.get("confidence") or 0.0),
+        "suggested_connection_user_id": result.get("suggested_connection_user_id"),
+    }
+
+
+def compute_outreach_confidence(replies: list[dict]) -> float:
+    """Deterministic confidence for outreach-based answers."""
+    if not replies:
+        return 0.1
+
+    base = 0.4
+    boost = 0.0
+    for reply in replies:
+        text = (reply.get("text") or "").lower()
+        if any(x in text for x in ["event", "meet", "session", "talk"]):
+            boost += 0.2
+            break
+    for reply in replies:
+        text = (reply.get("text") or "").lower()
+        if any(x in text for x in ["pm", "am", "tonight", "today", "at ", "location", "room"]):
+            boost += 0.2
+            break
+    for reply in replies:
+        text = (reply.get("text") or "").lower()
+        if any(x in text for x in ["discord", "email", "ig", "instagram", "group chat", "flyer"]):
+            boost += 0.2
+            break
+    if len(replies) >= 2:
+        boost += 0.2
+
+    return min(0.95, base + boost)
+
+
+def insert_link_response(
+    conversation_id: str,
+    university_id: str,
+    text: str,
+    citations: list[dict],
+    cards: dict,
+    confidence: float,
+    session_id: Optional[str] = None,
+) -> None:
+    link_profile = db.get_link_system_profile(university_id)
+    sender_id = link_profile.get("link_user_id") if link_profile else None
+    metadata = {
+        "shareType": "text",
+        "citations": citations,
+        "cards": cards,
+        "confidence": confidence,
+    }
+    db.insert_link_message(conversation_id, sender_id, text, metadata, session_id=session_id)
+
+    if not cards:
+        return
+
+    for event_id in cards.get("event_ids") or []:
+        event = db.get_event(event_id)
+        if not event:
+            continue
+        metadata = build_card_metadata(event, "event")
+        if metadata:
+            db.insert_link_message(conversation_id, sender_id, event.get("title") or "Event", metadata, session_id=session_id)
+
+    for user_id in cards.get("user_ids") or []:
+        profile = db.get_profile(user_id, enforce_public=True)
+        if not profile:
+            continue
+        metadata = build_card_metadata(profile, "profile")
+        if metadata:
+            db.insert_link_message(conversation_id, sender_id, profile.get("full_name") or "Student", metadata, session_id=session_id)
+
+    for org_id in cards.get("club_ids") or []:
+        org = db.get_organization(org_id)
+        if not org:
+            continue
+        metadata = build_card_metadata(org, "organization")
+        if metadata:
+            db.insert_link_message(conversation_id, sender_id, org.get("name") or "Club", metadata, session_id=session_id)
+
+
+def start_outreach(
+    user_id: str,
+    university_id: str,
+    link_conversation_id: str,
+    question: str,
+    intent: dict,
+    session_id: Optional[str] = None,
+    access_token: Optional[str] = None,
+) -> dict:
+    """Create an outreach run and DM targets."""
+    run = db.create_link_outreach_run(
+        {
+            "link_conversation_id": link_conversation_id,
+            "requester_user_id": user_id,
+            "query": question,
+            "intent": intent.get("intent"),
+            "status": "collecting",
+            "intent_payload": intent,
+        }
+    )
+
+    tags = intent.get("tags") or []
+    style_instructions = build_style_instructions(None)
+    requester_profile = None
+    if access_token:
+        requester_profile = db.get_profile_rls(access_token, user_id)
+    if not requester_profile:
+        requester_profile = db.get_profile(user_id, enforce_public=True)
+    if requester_profile and not requester_profile.get("yearbook_visible", True):
+        requester_profile = None
+    dm_text = build_outreach_message(
+        question,
+        intent.get("intent"),
+        tags,
+        style_instructions=style_instructions,
+        requester_profile=requester_profile,
+    )
+
+    batch_size = min(settings.OUTREACH_BATCH_SIZE, 10)
+    targets = outreach_logic.select_outreach_targets(
+        requester_id=user_id,
+        university_id=university_id,
+        entities=tags,
+        batch_size=batch_size,
+        excluded_ids=[user_id],
+    )
+
+    link_profile = db.get_link_system_profile(university_id)
+    sender_id = link_profile.get("link_user_id") if link_profile else None
+
+    target_rows: list[dict] = []
+    for target in targets:
+        target_user_id = target.get("user_id")
+        if not target_user_id or not sender_id:
+            continue
+        convo = db.get_or_create_dm_conversation(sender_id, target_user_id)
+        if not convo:
+            continue
+        message = db.insert_message(
+            convo["id"],
+            sender_id,
+            dm_text,
+            {
+                "shareType": "text",
+                "requester_user_id": user_id,
+                "requester_profile": {
+                    "full_name": requester_profile.get("full_name") if requester_profile else None,
+                    "username": requester_profile.get("username") if requester_profile else None,
+                    "major": requester_profile.get("major") if requester_profile else None,
+                    "bio": requester_profile.get("bio") if requester_profile else None,
+                    "interests": requester_profile.get("interests") if requester_profile else None,
+                },
+            },
+        )
+        target_rows.append(
+            {
+                "run_id": run["id"],
+                "target_user_id": target_user_id,
+                "dm_conversation_id": convo["id"],
+                "outreach_message_id": message.get("id"),
+                "status": "sent",
+            }
+        )
+
+    if target_rows:
+        db.create_link_outreach_targets(target_rows)
+
+    link_profile = db.get_link_system_profile(university_id)
+    sender_id = link_profile.get("link_user_id") if link_profile else None
+    db.insert_link_message(
+        link_conversation_id,
+        sender_id,
+        "Not sure yet - I'm asking a few people and I'll report back.",
+        {"shareType": "text", "run_id": run["id"]},
+        session_id=session_id,
+    )
+
+    return {"run_id": run["id"], "targets": target_rows, "dm_text": dm_text}
+
+
+def collect_outreach(
+    run_id: str,
+    university_id: str,
+    session_id: Optional[str] = None,
+    access_token: Optional[str] = None,
+) -> dict:
+    """Collect replies and respond in Link chat."""
+    run = db.get_link_outreach_run(run_id)
+    if not run:
+        return {"status": "failed", "message": "Run not found"}
+
+    targets = db.list_link_outreach_targets(run_id)
+    replies: list[dict] = []
+
+    for target in targets:
+        if target.get("status") == "replied":
+            continue
+        messages = db.list_messages_for_conversation(
+            target["dm_conversation_id"],
+            after=target.get("sent_at"),
+            sender_id=target.get("target_user_id"),
+            limit=5,
+        )
+        if not messages:
+            continue
+        reply = messages[0]
+        db.update_link_outreach_target(
+            target["id"],
+            {
+                "reply_message_id": reply.get("id"),
+                "status": "replied",
+                "updated_at": _now_utc().isoformat(),
+            },
+        )
+        replies.append(
+            {
+                "user_id": target.get("target_user_id"),
+                "message_id": reply.get("id"),
+                "text": reply.get("content"),
+            }
+        )
+
+    if not replies:
+        replies = []
+
+    if (
+        not replies
+        and not run.get("forum_post_id")
+        and access_token
+        and int(run.get("expansions") or 0) >= 2
+        and len(targets) >= 10
+    ):
+        created = create_forum_post(
+            access_token,
+            university_id,
+            run.get("requester_user_id"),
+            run.get("query"),
+            (run.get("intent_payload") or {}).get("tags") or [],
+        )
+        if created:
+            forum = created.get("forum") or {}
+            post = created.get("post") or {}
+            db.update_link_outreach_run(
+                run_id,
+                {
+                    "status": "forum_posted",
+                    "forum_id": forum.get("id"),
+                    "forum_post_id": post.get("id"),
+                    "forum_posted_at": _now_utc().isoformat(),
+                    "updated_at": _now_utc().isoformat(),
+                },
+            )
+            link_profile = db.get_link_system_profile(university_id)
+            sender_id = link_profile.get("link_user_id") if link_profile else None
+            if sender_id:
+                db.insert_link_message(
+                    run.get("link_conversation_id"),
+                    sender_id,
+                    "I couldn't find anyone yet, so I made an anonymous forum post. I'll let you know if anyone replies.",
+                    {"shareType": "text", "run_id": run_id, "forum_post_id": post.get("id")},
+                    session_id=session_id,
+                )
+        return {"status": run.get("status"), "message": "Posted to forum."}
+
+    if run.get("forum_post_id") and access_token:
+        posted_at = run.get("forum_posted_at") or run.get("updated_at")
+        comments = db.list_forum_comments_rls(access_token, run.get("forum_post_id"), after=posted_at)
+        if comments:
+            requester_profile = db.get_profile_rls(access_token, run.get("requester_user_id"))
+            if requester_profile and not requester_profile.get("yearbook_visible", True):
+                requester_profile = None
+            dm_text = build_outreach_message(
+                run.get("query"),
+                run.get("intent"),
+                (run.get("intent_payload") or {}).get("tags") or [],
+                style_instructions=build_style_instructions(None),
+                requester_profile=requester_profile,
+            )
+            existing_targets = {t.get("target_user_id") for t in targets}
+            new_rows: list[dict] = []
+            link_profile = db.get_link_system_profile(university_id)
+            sender_id = link_profile.get("link_user_id") if link_profile else None
+            for comment in comments:
+                commenter_id = comment.get("user_id")
+                if not commenter_id or commenter_id in existing_targets or not sender_id:
+                    continue
+                convo = db.get_or_create_dm_conversation(sender_id, commenter_id)
+                if not convo:
+                    continue
+                message = db.insert_message(
+                    convo["id"],
+                    sender_id,
+                    dm_text,
+                    {"shareType": "text", "requester_user_id": run.get("requester_user_id")},
+                )
+                new_rows.append(
+                    {
+                        "run_id": run_id,
+                        "target_user_id": commenter_id,
+                        "dm_conversation_id": convo["id"],
+                        "outreach_message_id": message.get("id"),
+                        "status": "sent",
+                        "source_comment_id": comment.get("id"),
+                    }
+                )
+            if new_rows:
+                db.create_link_outreach_targets(new_rows)
+        return {"status": run.get("status"), "message": "Collecting forum replies."}
+
+    min_replies = 2 if len(replies) >= 2 else 1
+    if len(replies) < min_replies:
+        expansions = int(run.get("expansions") or 0)
+        max_targets = 10
+        if expansions < 2 and len(targets) < max_targets:
+            additional = min(5, max_targets - len(targets))
+            excluded_ids = [run.get("requester_user_id")] + [t.get("target_user_id") for t in targets]
+            requester_profile = db.get_profile(run.get("requester_user_id"), enforce_public=True)
+            if requester_profile and not requester_profile.get("yearbook_visible", True):
+                requester_profile = None
+            more_targets = outreach_logic.select_outreach_targets(
+                requester_id=run.get("requester_user_id"),
+                university_id=university_id,
+                entities=(run.get("intent_payload") or {}).get("tags") or [],
+                batch_size=additional,
+                excluded_ids=excluded_ids,
+            )
+            link_profile = db.get_link_system_profile(university_id)
+            sender_id = link_profile.get("link_user_id") if link_profile else None
+            dm_text = build_outreach_message(
+                run.get("query"),
+                run.get("intent"),
+                (run.get("intent_payload") or {}).get("tags") or [],
+                style_instructions=build_style_instructions(None),
+                requester_profile=requester_profile,
+            )
+            new_rows: list[dict] = []
+            for target in more_targets:
+                target_user_id = target.get("user_id")
+                if not target_user_id or not sender_id:
+                    continue
+                convo = db.get_or_create_dm_conversation(sender_id, target_user_id)
+                if not convo:
+                    continue
+                message = db.insert_message(convo["id"], sender_id, dm_text, {"shareType": "text"})
+                new_rows.append(
+                    {
+                        "run_id": run_id,
+                        "target_user_id": target_user_id,
+                        "dm_conversation_id": convo["id"],
+                        "outreach_message_id": message.get("id"),
+                        "status": "sent",
+                    }
+                )
+            if new_rows:
+                db.create_link_outreach_targets(new_rows)
+                db.update_link_outreach_run(
+                    run_id,
+                    {
+                        "expansions": expansions + 1,
+                        "updated_at": _now_utc().isoformat(),
+                    },
+                )
+                db.insert_link_message(
+                    run.get("link_conversation_id"),
+                    sender_id,
+                    "Still waiting on replies - I asked a few more people.",
+                    {"shareType": "text", "run_id": run_id},
+                    session_id=session_id,
+                )
+        return {"status": run.get("status"), "message": "Still collecting replies."}
+
+    requester_memory = db.get_user_memory(run.get("requester_user_id")) if run.get("requester_user_id") else None
+    style_instructions = build_style_instructions(requester_memory)
+    extracted = extract_and_rank_replies(replies, run.get("query"), style_instructions=style_instructions)
+    confidence = compute_outreach_confidence(replies)
+
+    citations = [
+        {"type": "outreach_reply", "id": r.get("message_id"), "user_id": r.get("user_id")}
+        for r in replies
+    ]
+
+    answer_text = extracted.get("final_answer_text") or "Here's what I heard back."
+    ranked = extracted.get("ranked_results") or []
+    top_summary = ranked[0].get("result_summary") if ranked else None
+
+    convo_id = run.get("link_conversation_id")
+    insert_link_response(
+        convo_id,
+        university_id,
+        answer_text,
+        citations,
+        cards={},
+        confidence=confidence,
+        session_id=session_id,
+    )
+    try:
+        write_verified_fact_from_outreach(
+            university_id,
+            run_id,
+            answer_text,
+            confidence,
+            result_summary=top_summary,
+        )
+    except Exception:
+        pass
+
+    suggested = extracted.get("suggested_connection_user_id")
+    if run.get("intent") == "person_search" and not suggested:
+        for reply in replies:
+            reply_type, consent, _ = outreach_logic.interpret_reply(reply.get("text") or "")
+            if consent == "yes":
+                suggested = reply.get("user_id")
+                break
+    if suggested:
+        link_profile = db.get_link_system_profile(university_id)
+        sender_id = link_profile.get("link_user_id") if link_profile else None
+        db.update_link_outreach_run(
+            run_id,
+            {
+                "status": "awaiting_consent",
+                "suggested_connection_user_id": suggested,
+                "confidence": confidence,
+                "updated_at": _now_utc().isoformat(),
+            },
+        )
+        if sender_id:
+            db.insert_link_message(
+                convo_id,
+                sender_id,
+                "Want me to connect you?",
+                {"shareType": "text", "run_id": run_id, "suggested_user_id": suggested},
+                session_id=session_id,
+            )
+        return {"status": "awaiting_consent", "confidence": confidence}
+
+    db.update_link_outreach_run(
+        run_id,
+        {
+            "status": "done",
+            "confidence": confidence,
+            "updated_at": _now_utc().isoformat(),
+        },
+    )
+
+    return {"status": "done", "confidence": confidence}
+
+
+def resolve_consent(
+    run_id: str,
+    requester_user_id: str,
+    target_user_id: str,
+    requester_ok: bool,
+    target_ok: bool,
+) -> dict:
+    """Create an intro chat once both sides consent."""
+    run = db.get_link_outreach_run(run_id)
+    if not run:
+        return {"status": "failed", "message": "Run not found"}
+
+    convo_id = run.get("link_conversation_id")
+    requester_profile = db.get_profile(requester_user_id, enforce_public=False) or {}
+    university_id = requester_profile.get("university_id")
+    link_profile = db.get_link_system_profile(university_id) if university_id else None
+    link_sender_id = link_profile.get("link_user_id") if link_profile else None
+
+    if requester_ok and target_ok:
+        convo = db.create_conversation(
+            {
+                "type": "direct",
+                "created_by": requester_user_id,
+                "is_system_generated": True,
+            }
+        )
+        db.add_conversation_participants(convo["id"], [requester_user_id, target_user_id])
+
+        intro = "Intro: you both mentioned you're into this - I'll let you take it from here."
+        if link_sender_id:
+            db.insert_message(convo["id"], link_sender_id, intro, {"shareType": "text"})
+
+        db.update_link_outreach_run(
+            run_id,
+            {
+                "status": "done",
+                "updated_at": _now_utc().isoformat(),
+            },
+        )
+        if link_sender_id:
+            db.insert_link_message(
+                convo_id,
+                link_sender_id,
+                "Connected - I made a chat.",
+                {"shareType": "text", "run_id": run_id},
+            )
+        return {"status": "done", "conversation_id": convo["id"]}
+
+    # If requester declines, let the target know politely and keep searching.
+    if not requester_ok:
+        if link_sender_id:
+            convo = db.get_or_create_dm_conversation(link_sender_id, target_user_id)
+            if convo:
+                db.insert_message(
+                    convo["id"],
+                    link_sender_id,
+                    "Hey! They already found someone, but if you're looking for friends who are into this, lmk and I can help.",
+                    {"shareType": "text"},
+                )
+        db.update_link_outreach_run(
+            run_id,
+            {
+                "status": "forum_posted" if run.get("forum_post_id") else "collecting",
+                "suggested_connection_user_id": None,
+                "updated_at": _now_utc().isoformat(),
+            },
+        )
+        # mark target declined
+        targets = db.list_link_outreach_targets(run_id)
+        for t in targets:
+            if t.get("target_user_id") == target_user_id:
+                db.update_link_outreach_target(t.get("id"), {"status": "declined", "updated_at": _now_utc().isoformat()})
+                break
+        if link_sender_id:
+            db.insert_link_message(
+                convo_id,
+                link_sender_id,
+                "Got it - I'll keep looking for someone else.",
+                {"shareType": "text", "run_id": run_id},
+            )
+        return {"status": "collecting"}
+
+    # If target declines, let requester know and keep searching.
+    if not target_ok:
+        db.update_link_outreach_run(
+            run_id,
+            {
+                "status": "forum_posted" if run.get("forum_post_id") else "collecting",
+                "suggested_connection_user_id": None,
+                "updated_at": _now_utc().isoformat(),
+            },
+        )
+        targets = db.list_link_outreach_targets(run_id)
+        for t in targets:
+            if t.get("target_user_id") == target_user_id:
+                db.update_link_outreach_target(t.get("id"), {"status": "declined", "updated_at": _now_utc().isoformat()})
+                break
+        if link_sender_id:
+            db.insert_link_message(
+                convo_id,
+                link_sender_id,
+                "They weren't available, but I'll keep looking.",
+                {"shareType": "text", "run_id": run_id},
+            )
+        return {"status": "collecting"}
+
+    db.update_link_outreach_run(
+        run_id,
+        {
+            "status": "failed",
+            "updated_at": _now_utc().isoformat(),
+        },
+    )
+    if link_sender_id:
+        db.insert_link_message(
+            convo_id,
+            link_sender_id,
+            "No worries - I won't connect you.",
+            {"shareType": "text", "run_id": run_id},
+        )
+    return {"status": "failed"}

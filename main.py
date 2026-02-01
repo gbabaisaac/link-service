@@ -23,8 +23,15 @@ from schemas import (
     StyleLearnResponse,
     StyleProfileResponse,
     ReindexRequest,
+    LinkAgentRequest,
+    LinkAgentResponse,
+    LinkOutreachCollectRequest,
+    LinkOutreachCollectResponse,
+    LinkConsentResolveRequest,
+    LinkConsentResolveResponse,
 )
 import link_logic
+import link_orchestrator
 import outreach_logic
 import rag_index
 import supabase_client as db
@@ -122,6 +129,199 @@ async def query(request: QueryRequest):
                 "message": "I'm not confident yet. I can ask a few relevant students.",
             }
         return QueryResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ Link Orchestrator Endpoints ============
+
+@app.post("/link/agent", response_model=LinkAgentResponse)
+async def link_agent(request: LinkAgentRequest):
+    """Handle Link chat message with grounded answer or outreach."""
+    try:
+        convo = db.get_or_create_link_conversation(request.user_id)
+        if not convo:
+            raise HTTPException(status_code=404, detail="Link conversation not found")
+
+        session = None
+        if request.session_id:
+            session = db.get_link_session_for_user(request.session_id, request.user_id)
+        if not session:
+            session = db.get_or_create_link_session(request.user_id, request.university_id)
+        if session:
+            db.set_link_conversation_session(convo["id"], session["id"])
+
+        db.insert_link_message(
+            convo["id"],
+            request.user_id,
+            request.message_text,
+            {"shareType": "text"},
+            session_id=session["id"] if session else None,
+            sender_type="user",
+        )
+
+        user_memory = link_orchestrator.update_user_style_memory(
+            request.user_id, request.university_id, request.message_text
+        )
+        style_instructions = link_orchestrator.build_style_instructions(user_memory)
+
+        intent = link_orchestrator.route_intent(request.message_text)
+        if intent["intent"] == "casual_chat":
+            reply = "hey! want help finding people, events, or clubs on campus?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                reply,
+                citations=[],
+                cards={},
+                confidence=0.2,
+                session_id=session["id"] if session else None,
+            )
+            return LinkAgentResponse(mode="answered", confidence=0.2, answer_text=reply, citations=[])
+
+        records = link_orchestrator.retrieve_candidates(
+            intent["intent"],
+            intent["tags"],
+            intent["time_window"],
+            request.university_id,
+            access_token=request.access_token,
+        )
+        cached_facts = records.get("facts") or []
+        if cached_facts:
+            cached_answer = link_orchestrator.compose_cached_answer(
+                request.message_text, cached_facts, style_instructions=style_instructions
+            )
+            if (
+                cached_answer["answer_mode"] == "direct"
+                and cached_answer.get("citations")
+                and link_orchestrator.validate_cached_citations(cached_answer.get("citations"), cached_facts)
+            ):
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    cached_answer.get("answer_text") or "Here's what I found.",
+                    citations=cached_answer.get("citations") or [],
+                    cards={},
+                    confidence=cached_answer.get("confidence", 0.0),
+                    session_id=session["id"] if session else None,
+                )
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=cached_answer.get("confidence", 0.0),
+                    answer_text=cached_answer.get("answer_text"),
+                    cards={},
+                    citations=cached_answer.get("citations") or [],
+                )
+        answer = link_orchestrator.compose_grounded_answer(
+            request.message_text, records, style_instructions=style_instructions
+        )
+        if answer.get("answer_mode") == "direct" and not answer.get("citations"):
+            answer["answer_mode"] = "ask_clarifying"
+        db_confidence = link_orchestrator.compute_db_confidence(records, intent["tags"], intent["time_window"])
+        confidence = min(max(answer["confidence"], 0.0), db_confidence)
+
+        if (
+            answer["answer_mode"] == "direct"
+            and answer.get("citations")
+            and link_orchestrator.validate_record_citations(answer.get("citations"), records)
+            and confidence >= settings.CONFIDENCE_THRESHOLD
+        ):
+            cards = answer.get("cards") or {}
+            valid_event_ids = {e.get("id") for e in records.get("events", []) if e.get("id")}
+            valid_user_ids = {p.get("id") for p in records.get("profiles", []) if p.get("id")}
+            valid_club_ids = {o.get("id") for o in records.get("orgs", []) if o.get("id")}
+            cards = {
+                "event_ids": [cid for cid in cards.get("event_ids", []) if cid in valid_event_ids],
+                "user_ids": [cid for cid in cards.get("user_ids", []) if cid in valid_user_ids],
+                "club_ids": [cid for cid in cards.get("club_ids", []) if cid in valid_club_ids],
+            }
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                answer.get("answer_text") or "Here's what I found.",
+                citations=answer.get("citations") or [],
+                cards=cards,
+                confidence=confidence,
+                session_id=session["id"] if session else None,
+            )
+            link_orchestrator.write_verified_facts_from_records(
+                request.university_id,
+                records,
+                answer.get("citations") or [],
+                answer.get("answer_text") or "",
+                confidence,
+            )
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=confidence,
+                answer_text=answer.get("answer_text"),
+                cards=cards,
+                citations=answer.get("citations") or [],
+            )
+
+        if answer["answer_mode"] == "ask_clarifying":
+            clarifying = answer.get("answer_text") or "Can you share a bit more detail so I can look this up?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                clarifying,
+                citations=[],
+                cards={},
+                confidence=confidence,
+                session_id=session["id"] if session else None,
+            )
+            return LinkAgentResponse(mode="answered", confidence=confidence, answer_text=clarifying, citations=[])
+
+        outreach = link_orchestrator.start_outreach(
+            request.user_id,
+            request.university_id,
+            convo["id"],
+            request.message_text,
+            intent,
+            session_id=session["id"] if session else None,
+            access_token=request.access_token,
+        )
+        return LinkAgentResponse(mode="outreach_started", confidence=confidence, run_id=outreach["run_id"])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/outreach/collect", response_model=LinkOutreachCollectResponse)
+async def link_outreach_collect(request: LinkOutreachCollectRequest):
+    """Collect outreach replies and respond in Link chat."""
+    try:
+        result = link_orchestrator.collect_outreach(
+            request.run_id,
+            request.university_id,
+            session_id=request.session_id,
+            access_token=request.access_token,
+        )
+        return LinkOutreachCollectResponse(
+            status=result.get("status"),
+            confidence=result.get("confidence"),
+            message=result.get("message"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/consent/resolve", response_model=LinkConsentResolveResponse)
+async def link_consent_resolve(request: LinkConsentResolveRequest):
+    """Resolve two-sided consent and create intro chat."""
+    try:
+        result = link_orchestrator.resolve_consent(
+            request.run_id,
+            request.requester_user_id,
+            request.target_user_id,
+            request.requester_ok,
+            request.target_ok,
+        )
+        return LinkConsentResolveResponse(
+            status=result.get("status"),
+            conversation_id=result.get("conversation_id"),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -354,13 +554,17 @@ async def connect_users(request: ConnectRequest):
 @app.post("/style/learn", response_model=StyleLearnResponse)
 async def learn_style(request: StyleLearnRequest):
     """Learn user's communication style from a message."""
-    # TODO: Implement style analyzer
+    memory = link_orchestrator.update_user_style_memory(
+        request.user_id,
+        (db.get_profile(request.user_id, enforce_public=False) or {}).get("university_id", ""),
+        request.message,
+    )
     return StyleLearnResponse(
         style_updated=True,
-        current_archetype="neutral",
-        archetype_confidence=0.0,
-        messages_analyzed=1,
-        detected_features={},
+        current_archetype=memory.get("communication_archetype", "genz_casual"),
+        archetype_confidence=float(memory.get("style_confidence") or 0.0),
+        messages_analyzed=int(memory.get("messages_analyzed") or 0),
+        detected_features=memory.get("detected_style") or {},
     )
 
 

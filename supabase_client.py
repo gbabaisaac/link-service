@@ -6,6 +6,7 @@ from supabase import create_client, Client
 from config import settings
 
 _client: Optional[Client] = None
+_rls_clients: dict[str, Client] = {}
 
 
 def get_supabase_client() -> Client:
@@ -16,6 +17,24 @@ def get_supabase_client() -> Client:
             raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
         _client = create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_KEY)
     return _client
+
+
+def get_supabase_client_for_user(access_token: str) -> Client:
+    """Create a Supabase client that enforces RLS for a user."""
+    if not access_token:
+        return get_supabase_client()
+    cached = _rls_clients.get(access_token)
+    if cached:
+        return cached
+    if not settings.SUPABASE_URL or not settings.SUPABASE_ANON_KEY:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_ANON_KEY must be set for RLS client")
+    client = create_client(
+        settings.SUPABASE_URL,
+        settings.SUPABASE_ANON_KEY,
+        options={"global": {"headers": {"Authorization": f"Bearer {access_token}"}}},
+    )
+    _rls_clients[access_token] = client
+    return client
 
 
 # ============ Profile Functions ============
@@ -36,6 +55,15 @@ def get_profiles(university_id: Optional[str] = None, limit: int = 500) -> list[
     return query.limit(limit).execute().data
 
 
+def get_profiles_rls(access_token: str, university_id: Optional[str] = None, limit: int = 500) -> list[dict]:
+    """Fetch profiles using RLS for a user."""
+    client = get_supabase_client_for_user(access_token)
+    query = client.table("profiles").select("*")
+    if university_id:
+        query = query.eq("university_id", university_id)
+    return query.limit(limit).execute().data
+
+
 def get_profile(user_id: str, enforce_public: bool = True) -> Optional[dict]:
     """Fetch a single profile by user ID."""
     client = get_supabase_client()
@@ -49,6 +77,13 @@ def get_profile(user_id: str, enforce_public: bool = True) -> Optional[dict]:
         )
     result = query.execute()
     return result.data[0] if result.data else None
+
+
+def get_profile_rls(access_token: str, user_id: str) -> Optional[dict]:
+    """Fetch a single profile by user ID using RLS."""
+    client = get_supabase_client_for_user(access_token)
+    result = client.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
+    return result.data if result.data else None
 
 
 def get_link_system_profile(university_id: str) -> Optional[dict]:
@@ -72,6 +107,15 @@ def get_organizations(university_id: Optional[str] = None, limit: int = 200) -> 
     """Fetch organizations, optionally filtered by university."""
     client = get_supabase_client()
     query = client.table("organizations").select("*").eq("is_public", True)
+    if university_id:
+        query = query.eq("university_id", university_id)
+    return query.limit(limit).execute().data
+
+
+def get_organizations_rls(access_token: str, university_id: Optional[str] = None, limit: int = 200) -> list[dict]:
+    """Fetch organizations using RLS for a user."""
+    client = get_supabase_client_for_user(access_token)
+    query = client.table("organizations").select("*")
     if university_id:
         query = query.eq("university_id", university_id)
     return query.limit(limit).execute().data
@@ -117,6 +161,44 @@ def get_upcoming_events(university_id: Optional[str] = None, limit: int = 100) -
     if university_id:
         query = query.eq("university_id", university_id)
     return query.order("start_at").limit(limit).execute().data
+
+
+def get_upcoming_events_rls(access_token: str, university_id: Optional[str] = None, limit: int = 100) -> list[dict]:
+    """Fetch upcoming events using RLS for a user."""
+    client = get_supabase_client_for_user(access_token)
+    query = client.table("events").select("*").gte("start_at", "now()")
+    if university_id:
+        query = query.eq("university_id", university_id)
+    return query.order("start_at").limit(limit).execute().data
+
+
+def list_forums_rls(access_token: str, university_id: Optional[str] = None, limit: int = 50) -> list[dict]:
+    """List forums using RLS for a user."""
+    client = get_supabase_client_for_user(access_token)
+    query = client.table("forums").select("*")
+    if university_id:
+        query = query.eq("university_id", university_id)
+    return query.order("created_at", desc=False).limit(limit).execute().data
+
+
+def create_post_rls(access_token: str, payload: dict) -> dict:
+    """Create a forum post using RLS for a user."""
+    client = get_supabase_client_for_user(access_token)
+    return client.table("posts").insert(payload).execute().data[0]
+
+
+def list_forum_comments_rls(
+    access_token: str,
+    post_id: str,
+    after: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict]:
+    """List forum comments for a post using RLS for a user."""
+    client = get_supabase_client_for_user(access_token)
+    query = client.table("forum_comments").select("*").eq("post_id", post_id).is_("deleted_at", "null")
+    if after:
+        query = query.gt("created_at", after)
+    return query.order("created_at", desc=False).limit(limit).execute().data
 
 
 def get_events_count(university_id: Optional[str] = None) -> int:
@@ -242,12 +324,13 @@ def insert_link_message(
     content: str,
     metadata: Optional[dict] = None,
     session_id: Optional[str] = None,
+    sender_type: str = "link",
 ) -> Optional[dict]:
     """Insert a Link message into link_messages."""
     client = get_supabase_client()
     payload = {
         "conversation_id": conversation_id,
-        "sender_type": "link",
+        "sender_type": sender_type,
         "sender_id": sender_id,
         "content": content,
         "metadata": metadata or {},
@@ -265,6 +348,56 @@ def set_link_conversation_session(conversation_id: str, session_id: str) -> None
         "session_id": session_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", conversation_id).execute()
+
+
+# ============ Link Outreach (Runs/Targets) ============
+
+def create_link_outreach_run(payload: dict) -> dict:
+    """Create a link outreach run."""
+    client = get_supabase_client()
+    return client.table("link_outreach_runs").insert(payload).execute().data[0]
+
+
+def get_link_outreach_run(run_id: str) -> Optional[dict]:
+    """Fetch a link outreach run by ID."""
+    client = get_supabase_client()
+    result = client.table("link_outreach_runs").select("*").eq("id", run_id).maybe_single().execute()
+    return result.data if result.data else None
+
+
+def update_link_outreach_run(run_id: str, payload: dict) -> Optional[dict]:
+    """Update a link outreach run."""
+    client = get_supabase_client()
+    result = client.table("link_outreach_runs").update(payload).eq("id", run_id).execute()
+    return result.data[0] if result.data else None
+
+
+def create_link_outreach_targets(rows: list[dict]) -> list[dict]:
+    """Create link outreach target rows in bulk."""
+    if not rows:
+        return []
+    client = get_supabase_client()
+    return client.table("link_outreach_targets").insert(rows).execute().data
+
+
+def list_link_outreach_targets(run_id: str) -> list[dict]:
+    """List outreach targets for a run."""
+    client = get_supabase_client()
+    return (
+        client.table("link_outreach_targets")
+        .select("*")
+        .eq("run_id", run_id)
+        .order("sent_at", desc=False)
+        .execute()
+        .data
+    )
+
+
+def update_link_outreach_target(target_id: str, payload: dict) -> Optional[dict]:
+    """Update a link outreach target row."""
+    client = get_supabase_client()
+    result = client.table("link_outreach_targets").update(payload).eq("id", target_id).execute()
+    return result.data[0] if result.data else None
 
 
 # ============ Link Facts Functions ============
@@ -309,6 +442,44 @@ def create_link_fact(fact: dict) -> dict:
     client = get_supabase_client()
     return client.table("link_facts").insert(fact).execute().data[0]
 
+
+# ============ Verified Facts Cache ============
+
+def create_verified_fact(fact: dict) -> dict:
+    """Create a verified fact cache entry."""
+    client = get_supabase_client()
+    return client.table("link_verified_facts").insert(fact).execute().data[0]
+
+
+def get_verified_facts(university_id: str, tags: list[str], limit: int = 10) -> list[dict]:
+    """Fetch verified facts that match any tag in fact_value."""
+    client = get_supabase_client()
+    query = client.table("link_verified_facts").select("*").eq("university_id", university_id)
+    query = query.eq("consent_status", "opt_in")
+    if tags:
+        # Supabase doesn't support OR ilike easily; run sequentially and merge.
+        results: list[dict] = []
+        seen: set[str] = set()
+        for tag in tags:
+            if not tag:
+                continue
+            resp = query.ilike("fact_value", f"%{tag}%").limit(limit).execute().data
+            for row in resp:
+                row_id = row.get("id")
+                if row_id and row_id not in seen:
+                    results.append(row)
+                    seen.add(row_id)
+            if len(results) >= limit:
+                break
+        return results[:limit]
+    return query.limit(limit).execute().data
+
+
+def delete_expired_verified_facts(now_iso: str) -> int:
+    """Delete expired verified facts, return count if available."""
+    client = get_supabase_client()
+    result = client.table("link_verified_facts").delete().lt("expires_at", now_iso).execute()
+    return len(result.data or [])
 
 # ============ User Memory Functions ============
 
@@ -447,6 +618,63 @@ def insert_message(conversation_id: str, sender_id: str, content: str, metadata:
         "metadata": metadata or {},
     }
     return client.table("messages").insert(payload).execute().data[0]
+
+
+def list_messages_for_conversation(
+    conversation_id: str,
+    after: Optional[str] = None,
+    sender_id: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict]:
+    """List messages in a conversation, optionally filtered by sender and time."""
+    client = get_supabase_client()
+    query = client.table("messages").select("*").eq("conversation_id", conversation_id)
+    if sender_id:
+        query = query.eq("sender_id", sender_id)
+    if after:
+        query = query.gt("created_at", after)
+    return query.order("created_at", desc=False).limit(limit).execute().data
+
+
+def get_or_create_dm_conversation(user_id: str, other_user_id: str) -> Optional[dict]:
+    """Find or create a direct conversation between two users."""
+    client = get_supabase_client()
+    convo_ids = client.table("conversation_participants").select("conversation_id").eq("user_id", user_id).execute().data
+    convo_ids = [row["conversation_id"] for row in convo_ids]
+
+    if convo_ids:
+        shared = (
+            client.table("conversation_participants")
+            .select("conversation_id")
+            .eq("user_id", other_user_id)
+            .in_("conversation_id", convo_ids)
+            .execute()
+            .data
+        )
+        shared_ids = [row["conversation_id"] for row in shared]
+        if shared_ids:
+            convo = (
+                client.table("conversations")
+                .select("*")
+                .in_("id", shared_ids)
+                .eq("type", "direct")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if convo:
+                return convo[0]
+
+    convo = create_conversation(
+        {
+            "type": "direct",
+            "created_by": user_id,
+            "is_system_generated": True,
+        }
+    )
+    add_conversation_participants(convo["id"], [user_id, other_user_id])
+    return convo
 
 
 def get_classmates(user_id: str, semester: Optional[str] = None) -> list[str]:

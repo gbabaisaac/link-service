@@ -84,6 +84,34 @@ class ReindexRequest(BaseModel):
     university_id: Optional[str] = None
 
 
+# ============ Link Orchestrator (New) ============
+
+class LinkAgentRequest(BaseModel):
+    """Request body for /link/agent endpoint."""
+    user_id: str
+    university_id: str
+    message_text: str
+    session_id: Optional[str] = None
+    access_token: Optional[str] = None
+
+
+class LinkOutreachCollectRequest(BaseModel):
+    """Request body for /link/outreach/collect endpoint."""
+    run_id: str
+    university_id: str
+    session_id: Optional[str] = None
+    access_token: Optional[str] = None
+
+
+class LinkConsentResolveRequest(BaseModel):
+    """Request body for /link/consent/resolve endpoint."""
+    run_id: str
+    requester_user_id: str
+    target_user_id: str
+    requester_ok: bool
+    target_ok: bool
+
+
 # ============ Response Models ============
 
 class Intent(BaseModel):
@@ -196,6 +224,29 @@ class ConnectResponse(BaseModel):
     connection_id: str
     conversation_id: str
     intro_message: str
+
+
+class LinkAgentResponse(BaseModel):
+    """Response from /link/agent endpoint."""
+    mode: str
+    confidence: float
+    run_id: Optional[str] = None
+    answer_text: Optional[str] = None
+    cards: Optional[dict] = None
+    citations: list[dict] = []
+
+
+class LinkOutreachCollectResponse(BaseModel):
+    """Response from /link/outreach/collect endpoint."""
+    status: str
+    confidence: Optional[float] = None
+    message: Optional[str] = None
+
+
+class LinkConsentResolveResponse(BaseModel):
+    """Response from /link/consent/resolve endpoint."""
+    status: str
+    conversation_id: Optional[str] = None
 
 
 class StyleLearnResponse(BaseModel):
