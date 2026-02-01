@@ -2,7 +2,7 @@
 
 from typing import Optional
 from datetime import datetime, timezone
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
 from config import settings
 
 _client: Optional[Client] = None
@@ -28,11 +28,8 @@ def get_supabase_client_for_user(access_token: str) -> Client:
         return cached
     if not settings.SUPABASE_URL or not settings.SUPABASE_ANON_KEY:
         raise RuntimeError("SUPABASE_URL and SUPABASE_ANON_KEY must be set for RLS client")
-    client = create_client(
-        settings.SUPABASE_URL,
-        settings.SUPABASE_ANON_KEY,
-        options={"global": {"headers": {"Authorization": f"Bearer {access_token}"}}},
-    )
+    options = ClientOptions(headers={"Authorization": f"Bearer {access_token}"})
+    client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY, options=options)
     _rls_clients[access_token] = client
     return client
 
