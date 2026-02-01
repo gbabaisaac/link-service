@@ -369,6 +369,21 @@ def update_link_outreach_run(run_id: str, payload: dict) -> Optional[dict]:
     return result.data[0] if result.data else None
 
 
+def get_latest_active_outreach_run(requester_user_id: str) -> Optional[dict]:
+    """Fetch the most recent active outreach run for a requester."""
+    client = get_supabase_client()
+    result = (
+        client.table("link_outreach_runs")
+        .select("*")
+        .eq("requester_user_id", requester_user_id)
+        .in_("status", ["collecting", "forum_posted", "awaiting_consent"])
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
 def create_link_outreach_targets(rows: list[dict]) -> list[dict]:
     """Create link outreach target rows in bulk."""
     if not rows:

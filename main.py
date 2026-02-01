@@ -178,11 +178,18 @@ async def link_agent(request: LinkAgentRequest):
         style_instructions = link_orchestrator.build_style_instructions(user_memory)
 
         intent = link_orchestrator.route_intent(request.message_text)
+        capability = link_orchestrator.route_capability(request.message_text, intent)
         mode = link_orchestrator.determine_mode(request.message_text, intent)
+        if capability.get("can_answer_from_db"):
+            mode = "agent"
         if mode == "conversation":
             reply = link_orchestrator.generate_small_talk_response(
                 request.message_text, user_memory
             )
+            active_run = db.get_latest_active_outreach_run(request.user_id)
+            if active_run and "status" in (active_run or {}):
+                # Light reminder without derailing the convo
+                reply = f"{reply} btw i'm still asking a few people — want me to check in?"
             link_orchestrator.insert_link_response(
                 convo["id"],
                 request.university_id,
@@ -193,6 +200,61 @@ async def link_agent(request: LinkAgentRequest):
                 session_id=session["id"] if session else None,
             )
             return LinkAgentResponse(mode="answered", confidence=0.2, answer_text=reply, citations=[])
+
+        if capability.get("clarify_question"):
+            clarifying = capability.get("clarify_question")
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                clarifying,
+                citations=[],
+                cards={},
+                confidence=0.4,
+                session_id=session["id"] if session else None,
+            )
+            return LinkAgentResponse(mode="answered", confidence=0.4, answer_text=clarifying, citations=[])
+
+        if not capability.get("can_answer_from_db") and capability.get("needs_outreach"):
+            outreach = link_orchestrator.start_outreach(
+                request.user_id,
+                request.university_id,
+                convo["id"],
+                request.message_text,
+                intent,
+                session_id=session["id"] if session else None,
+                access_token=request.access_token,
+            )
+            return LinkAgentResponse(mode="outreach_started", confidence=0.4, run_id=outreach["run_id"])
+
+        # Handle simple count questions directly (no outreach)
+        q_lower = (request.message_text or "").lower()
+        if "how many" in q_lower:
+            if any(x in q_lower for x in ["org", "organization", "organizations", "club", "clubs"]):
+                count = db.get_organizations_count(request.university_id)
+                reply = f"looks like there are {count} orgs on campus."
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.8,
+                    session_id=session["id"] if session else None,
+                )
+                return LinkAgentResponse(mode="answered", confidence=0.8, answer_text=reply, citations=[])
+            if any(x in q_lower for x in ["event", "events"]):
+                count = db.get_events_count(request.university_id)
+                reply = f"looks like there are {count} events on campus."
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.8,
+                    session_id=session["id"] if session else None,
+                )
+                return LinkAgentResponse(mode="answered", confidence=0.8, answer_text=reply, citations=[])
 
         records = link_orchestrator.retrieve_candidates(
             intent["intent"],

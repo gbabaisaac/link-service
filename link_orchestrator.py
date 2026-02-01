@@ -325,6 +325,56 @@ Output JSON with:
     }
 
 
+def route_capability(question: str, intent: dict) -> dict:
+    """Decide whether the DB likely contains the answer or outreach is needed."""
+    if settings.TEST_MODE:
+        q = (question or "").lower()
+        if any(x in q for x in ["how many", "what time", "where", "when", "events", "club", "organization"]):
+            return {
+                "can_answer_from_db": True,
+                "sources": ["events", "orgs", "profiles"],
+                "needs_outreach": False,
+                "clarify_question": "",
+            }
+        return {
+            "can_answer_from_db": False,
+            "sources": [],
+            "needs_outreach": True,
+            "clarify_question": "",
+        }
+
+    prompt = f"""You are Link. Decide if this question can be answered from campus DB records.
+
+Question: "{question}"
+Intent: {intent}
+
+DB sources available: events, organizations (clubs), profiles (public yearbook), forums/posts.
+If answerable from DB, list which sources to query.
+If not answerable, set needs_outreach=true.
+If unclear, provide a short clarifying question.
+
+Return JSON:
+{{
+  "can_answer_from_db": true|false,
+  "sources": ["events","orgs","profiles","forums"],
+  "needs_outreach": true|false,
+  "clarify_question": "..."
+}}
+"""
+    result = llm_json(prompt, temperature=0)
+    can_answer = bool(result.get("can_answer_from_db", False))
+    sources = result.get("sources") or []
+    sources = [s for s in sources if s in {"events", "orgs", "profiles", "forums"}]
+    needs_outreach = bool(result.get("needs_outreach", False))
+    clarify = (result.get("clarify_question") or "").strip()
+    return {
+        "can_answer_from_db": can_answer,
+        "sources": sources,
+        "needs_outreach": needs_outreach,
+        "clarify_question": clarify,
+    }
+
+
 def _fallback_intent(message_text: str) -> str:
     text = (message_text or "").lower()
     if any(x in text for x in ["club", "organization", "org"]):
