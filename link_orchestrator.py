@@ -21,6 +21,13 @@ INTENT_TYPES = {
 
 TIME_WINDOWS = {"today", "this_week", None}
 
+DB_SCHEMA_HINT = (
+    "DB schema: events(title,start_at,location_name,description,type,visibility), "
+    "organizations(name,category,mission_statement,meeting_time,meeting_place,is_public), "
+    "profiles(full_name,username,major,bio,interests,yearbook_visible), "
+    "forums/posts(title,body,forum_id,is_public)."
+)
+
 SLANG_TERMS = {
     "fr", "frfr", "ngl", "tbh", "lowkey", "highkey", "rn", "idk", "idc", "imo",
     "lmk", "brb", "btw", "omg", "lol", "lmao", "lmfao", "wtf", "vibe", "vibes",
@@ -252,6 +259,31 @@ def generate_friend_checkin(user_memory: Optional[dict]) -> str:
     return "how's your day been?"
 
 
+def _parse_iso(ts: str) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        if ts.endswith("Z"):
+            ts = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(ts)
+    except Exception:
+        return None
+
+
+def should_ask_class_checkin(user_memory: Optional[dict]) -> Optional[str]:
+    """Return a class name to check in about if it's time."""
+    memory = user_memory or {}
+    state = memory.get("conversation_state") or {}
+    classes = state.get("classes") or []
+    if not classes:
+        return None
+    last_check = _parse_iso(memory.get("last_class_checkin") or "")
+    now = _now_utc()
+    if last_check and (now - last_check).total_seconds() < 60 * 60 * 18:
+        return None
+    return classes[-1]
+
+
 def generate_small_talk_response(message_text: str, user_memory: Optional[dict]) -> str:
     """Generate a casual, friend-like response without making factual claims."""
     text = (message_text or "").strip().lower()
@@ -265,7 +297,7 @@ def generate_small_talk_response(message_text: str, user_memory: Optional[dict])
         if any(x in text for x in ["yo", "hey", "hi", "sup", "what's up", "whats up"]):
             return "yo! what's good? " + like_hint
         if "?" in text:
-            return "gotchu — tell me a lil more and i'll help"
+            return "gotchu. tell me a lil more and i'll help"
         return "say less, what's the vibe?"
 
     style_instructions = build_style_instructions(user_memory)
@@ -344,6 +376,7 @@ def route_intent(message_text: str, user_context: Optional[dict] = None) -> dict
 
 User message: "{message_text}"
 {context}
+{DB_SCHEMA_HINT}
 
 Output JSON with:
 - intent: event_search | person_search | club_search | campus_info | casual_chat
@@ -399,6 +432,7 @@ def route_capability(question: str, intent: dict) -> dict:
 Question: "{question}"
 Intent: {intent}
 User context: {intent.get("user_context")}
+{DB_SCHEMA_HINT}
 
 DB sources available: events, organizations (clubs), profiles (public yearbook), forums/posts.
 If answerable from DB, list which sources to query.
@@ -893,6 +927,7 @@ def compose_grounded_answer(question: str, records: dict, style_instructions: st
 
 User question: "{question}"
 Style: {style_instructions}
+{DB_SCHEMA_HINT}
 
 Records (IDs and key fields):
 {summaries}
@@ -927,6 +962,50 @@ Return JSON:
         "citations": citations,
         "why": result.get("why") or "",
     }
+
+
+def try_db_query(question: str, intent: str, records: dict) -> Optional[dict]:
+    """Deterministic DB-first answers for obvious queries (no LLM)."""
+    text = (question or "").lower()
+    if "how many" in text:
+        if any(x in text for x in ["club", "clubs", "org", "organization", "organizations"]):
+            return {"type": "count_orgs"}
+        if any(x in text for x in ["event", "events"]):
+            return {"type": "count_events"}
+    if intent in {"club_search", "campus_info"}:
+        orgs = records.get("orgs") or []
+        if orgs:
+            picked = [o for o in orgs if o.get("id")][:2]
+            return {
+                "type": "list_orgs",
+                "answer_text": "here are a couple clubs that match:",
+                "cards": {"club_ids": [o.get("id") for o in picked]},
+                "citations": [{"type": "club", "id": o.get("id")} for o in picked],
+                "confidence": 0.8,
+            }
+    if intent == "event_search":
+        events = records.get("events") or []
+        if events:
+            picked = [e for e in events if e.get("id")][:2]
+            return {
+                "type": "list_events",
+                "answer_text": "here are a couple events coming up:",
+                "cards": {"event_ids": [e.get("id") for e in picked]},
+                "citations": [{"type": "event", "id": e.get("id")} for e in picked],
+                "confidence": 0.8,
+            }
+    if intent == "person_search":
+        profiles = records.get("profiles") or []
+        if profiles:
+            picked = [p for p in profiles if p.get("id")][:2]
+            return {
+                "type": "list_people",
+                "answer_text": "i found a couple people:",
+                "cards": {"user_ids": [p.get("id") for p in picked]},
+                "citations": [{"type": "user", "id": p.get("id")} for p in picked],
+                "confidence": 0.75,
+            }
+    return None
 
 
 def build_outreach_message(
@@ -1039,6 +1118,7 @@ def insert_link_response(
     cards: dict,
     confidence: float,
     session_id: Optional[str] = None,
+    task_state: Optional[str] = None,
 ) -> None:
     link_profile = db.get_link_system_profile(university_id)
     sender_id = link_profile.get("link_user_id") if link_profile else None
@@ -1048,6 +1128,8 @@ def insert_link_response(
         "cards": cards,
         "confidence": confidence,
     }
+    if task_state:
+        metadata["task_state"] = task_state
     db.insert_link_message(conversation_id, sender_id, text, metadata, session_id=session_id)
 
     if not cards:
@@ -1117,12 +1199,13 @@ def start_outreach(
     )
 
     batch_size = min(settings.OUTREACH_BATCH_SIZE, 10)
+    recent_targets = db.list_recent_outreach_target_ids(user_id, days=7)
     targets = outreach_logic.select_outreach_targets(
         requester_id=user_id,
         university_id=university_id,
         entities=tags,
         batch_size=batch_size,
-        excluded_ids=[user_id],
+        excluded_ids=[user_id] + recent_targets,
     )
 
     link_profile = db.get_link_system_profile(university_id)
@@ -1185,8 +1268,14 @@ def start_outreach(
     db.insert_link_message(
         link_conversation_id,
         sender_id,
-        "Not sure yet - I'm asking a few people and I'll report back.",
-        {"shareType": "text", "run_id": run["id"]},
+        "not sure yet - i'll ask a few people and report back.",
+        {
+            "shareType": "text",
+            "run_id": run["id"],
+            "run_status": "collecting",
+            "asked_count": len(target_rows),
+            "task_state": "collecting",
+        },
         session_id=session_id,
     )
 
@@ -1408,8 +1497,14 @@ def collect_outreach(
                 db.insert_link_message(
                     run.get("link_conversation_id"),
                     sender_id,
-                    "Still waiting on replies - I asked a few more people.",
-                    {"shareType": "text", "run_id": run_id},
+                    "still waiting on replies - i asked a few more people.",
+                    {
+                        "shareType": "text",
+                        "run_id": run_id,
+                        "run_status": "collecting",
+                        "asked_count": len(targets) + len(new_rows),
+                        "task_state": "collecting",
+                    },
                     session_id=session_id,
                 )
         return {"status": run.get("status"), "message": "Still collecting replies."}
@@ -1468,12 +1563,35 @@ def collect_outreach(
                 "updated_at": _now_utc().isoformat(),
             },
         )
+        try:
+            convo_state = db.get_link_conversation_state(run.get("requester_user_id"), convo_id)
+            if convo_state:
+                pending = convo_state.get("pending_consents") or []
+                pending.append(
+                    {
+                        "id": run_id,
+                        "type": "requester",
+                        "user_id": run.get("requester_user_id"),
+                        "message_sent_at": _now_utc().isoformat(),
+                        "response": "pending",
+                    }
+                )
+                db.update_link_conversation_state(
+                    convo_state["id"],
+                    {
+                        "mode": "awaiting_consent",
+                        "pending_consents": pending,
+                        "updated_at": _now_utc().isoformat(),
+                    },
+                )
+        except Exception:
+            pass
         if sender_id:
             db.insert_link_message(
                 convo_id,
                 sender_id,
                 "Want me to connect you?",
-                {"shareType": "text", "run_id": run_id, "suggested_user_id": suggested},
+                {"shareType": "text", "run_id": run_id, "suggested_user_id": suggested, "task_state": "awaiting_consent"},
                 session_id=session_id,
             )
         return {"status": "awaiting_consent", "confidence": confidence}
@@ -1486,6 +1604,19 @@ def collect_outreach(
             "updated_at": _now_utc().isoformat(),
         },
     )
+    try:
+        convo_state = db.get_link_conversation_state(run.get("requester_user_id"), convo_id)
+        if convo_state:
+            db.update_link_conversation_state(
+                convo_state["id"],
+                {
+                    "mode": "conversation",
+                    "active_task": None,
+                    "updated_at": _now_utc().isoformat(),
+                },
+            )
+    except Exception:
+        pass
 
     return {"status": "done", "confidence": confidence}
 
@@ -1534,8 +1665,34 @@ def resolve_consent(
                 convo_id,
                 link_sender_id,
                 "Connected - I made a chat.",
-                {"shareType": "text", "run_id": run_id, "run_status": "done"},
+                {"shareType": "text", "run_id": run_id, "run_status": "done", "task_state": "done"},
             )
+        try:
+            convo_state = db.get_link_conversation_state(requester_user_id, convo_id)
+            if convo_state:
+                pending = [c for c in (convo_state.get("pending_consents") or []) if c.get("id") != run_id]
+                resolved = convo_state.get("resolved_tasks") or []
+                resolved.append(
+                    {
+                        "id": run_id,
+                        "type": "people_search",
+                        "query": run.get("query"),
+                        "status": "resolved",
+                        "resolved_at": _now_utc().isoformat(),
+                    }
+                )
+                db.update_link_conversation_state(
+                    convo_state["id"],
+                    {
+                        "mode": "conversation",
+                        "active_task": None,
+                        "pending_consents": pending,
+                        "resolved_tasks": resolved,
+                        "updated_at": _now_utc().isoformat(),
+                    },
+                )
+        except Exception:
+            pass
         return {"status": "done", "conversation_id": convo["id"]}
 
     # If requester declines, let the target know politely and keep searching.
@@ -1570,6 +1727,32 @@ def resolve_consent(
                 "Got it - I'll keep looking for someone else.",
                 {"shareType": "text", "run_id": run_id},
             )
+        try:
+            convo_state = db.get_link_conversation_state(requester_user_id, convo_id)
+            if convo_state:
+                pending = [c for c in (convo_state.get("pending_consents") or []) if c.get("id") != run_id]
+                resolved = convo_state.get("resolved_tasks") or []
+                resolved.append(
+                    {
+                        "id": run_id,
+                        "type": "people_search",
+                        "query": run.get("query"),
+                        "status": "declined",
+                        "resolved_at": _now_utc().isoformat(),
+                    }
+                )
+                db.update_link_conversation_state(
+                    convo_state["id"],
+                    {
+                        "mode": "conversation",
+                        "active_task": None,
+                        "pending_consents": pending,
+                        "resolved_tasks": resolved,
+                        "updated_at": _now_utc().isoformat(),
+                    },
+                )
+        except Exception:
+            pass
         return {"status": "collecting"}
 
     # If target declines, let requester know and keep searching.
@@ -1594,6 +1777,32 @@ def resolve_consent(
                 "They weren't available, but I'll keep looking.",
                 {"shareType": "text", "run_id": run_id},
             )
+        try:
+            convo_state = db.get_link_conversation_state(requester_user_id, convo_id)
+            if convo_state:
+                pending = [c for c in (convo_state.get("pending_consents") or []) if c.get("id") != run_id]
+                resolved = convo_state.get("resolved_tasks") or []
+                resolved.append(
+                    {
+                        "id": run_id,
+                        "type": "people_search",
+                        "query": run.get("query"),
+                        "status": "declined",
+                        "resolved_at": _now_utc().isoformat(),
+                    }
+                )
+                db.update_link_conversation_state(
+                    convo_state["id"],
+                    {
+                        "mode": "conversation",
+                        "active_task": None,
+                        "pending_consents": pending,
+                        "resolved_tasks": resolved,
+                        "updated_at": _now_utc().isoformat(),
+                    },
+                )
+        except Exception:
+            pass
         return {"status": "collecting"}
 
     db.update_link_outreach_run(
@@ -1608,6 +1817,6 @@ def resolve_consent(
             convo_id,
             link_sender_id,
             "No worries - I won't connect you.",
-            {"shareType": "text", "run_id": run_id, "run_status": "done"},
+            {"shareType": "text", "run_id": run_id, "run_status": "done", "task_state": "done"},
         )
     return {"status": "failed"}

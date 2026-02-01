@@ -1,7 +1,7 @@
 """Supabase client and data access functions for Link AI."""
 
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client, ClientOptions
 from config import settings
 
@@ -405,6 +405,37 @@ def list_link_outreach_targets(run_id: str) -> list[dict]:
     )
 
 
+def list_recent_outreach_target_ids(requester_user_id: str, days: int = 7) -> list[str]:
+    """List target_user_id values contacted by requester in the last N days."""
+    client = get_supabase_client()
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    runs = (
+        client.table("link_outreach_runs")
+        .select("id")
+        .eq("requester_user_id", requester_user_id)
+        .gt("created_at", since)
+        .execute()
+        .data
+    )
+    run_ids = [r.get("id") for r in runs if r.get("id")]
+    if not run_ids:
+        return []
+    target_ids: list[str] = []
+    for run_id in run_ids:
+        rows = (
+            client.table("link_outreach_targets")
+            .select("target_user_id")
+            .eq("run_id", run_id)
+            .execute()
+            .data
+        )
+        for row in rows:
+            tid = row.get("target_user_id")
+            if tid and tid not in target_ids:
+                target_ids.append(tid)
+    return target_ids
+
+
 def update_link_outreach_target(target_id: str, payload: dict) -> Optional[dict]:
     """Update a link outreach target row."""
     client = get_supabase_client()
@@ -515,6 +546,49 @@ def upsert_user_memory(user_id: str, data: dict) -> dict:
             data.pop("conversation_state", None)
             return client.table("link_user_memory").upsert(data, on_conflict="user_id").execute().data[0]
         raise exc
+
+
+# ============ Link Conversation State ============
+
+def get_link_conversation_state(user_id: str, conversation_id: str) -> Optional[dict]:
+    """Fetch conversation state for a user + link conversation."""
+    client = get_supabase_client()
+    result = (
+        client.table("link_conversation_state")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("conversation_id", conversation_id)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def create_link_conversation_state(user_id: str, conversation_id: str) -> dict:
+    """Create a fresh conversation state row."""
+    client = get_supabase_client()
+    payload = {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "mode": "idle",
+        "active_task": None,
+        "pending_consents": [],
+        "resolved_tasks": [],
+    }
+    return client.table("link_conversation_state").insert(payload).execute().data[0]
+
+
+def get_or_create_link_conversation_state(user_id: str, conversation_id: str) -> dict:
+    """Fetch existing conversation state or create one."""
+    existing = get_link_conversation_state(user_id, conversation_id)
+    if existing:
+        return existing
+    return create_link_conversation_state(user_id, conversation_id)
+
+
+def update_link_conversation_state(state_id: str, data: dict) -> dict:
+    """Update conversation state by ID."""
+    client = get_supabase_client()
+    return client.table("link_conversation_state").update(data).eq("id", state_id).execute().data[0]
 
 
 # ============ Journal Functions ============
