@@ -284,6 +284,46 @@ Return JSON:
     return msg
 
 
+def classify_smalltalk(message_text: str) -> str:
+    """Classify smalltalk intent into general/capabilities/checkin."""
+    if settings.TEST_MODE:
+        text = (message_text or "").lower()
+        if any(x in text for x in ["what can you do", "what are you able to do", "what do you do", "what are you"]):
+            return "capabilities"
+        return "general"
+    prompt = f"""Classify the user's message as one of:
+- capabilities (asking what Link can do)
+- checkin (asking about Link or user's day)
+- general (small talk)
+
+Message: "{message_text}"
+
+Return JSON:
+{{"type":"capabilities|checkin|general"}}
+"""
+    result = llm_json(prompt, temperature=0)
+    return (result.get("type") or "general").strip()
+
+
+def generate_capabilities_response(message_text: str, user_memory: Optional[dict]) -> str:
+    """Generate a friendly capabilities response without hardcoding."""
+    if settings.TEST_MODE:
+        return "i'm your campus friend - i can find people, clubs, and events, answer campus qs, and ask around if i'm not sure."
+    style_instructions = build_style_instructions(user_memory)
+    prompt = f"""You're Link, a campus friend. Reply to the user explaining what you can do.
+Keep it short, casual, and confident. Mention: find people/clubs/events, answer campus questions from real data, ask around, and connect people with consent.
+
+User message: "{message_text}"
+Style: {style_instructions}
+
+Return JSON:
+{{"message":"..."}}
+"""
+    result = llm_json(prompt, temperature=0.4)
+    msg = (result.get("message") or "").strip()
+    return msg or "i can help you find people, clubs, and events, answer campus questions, and connect folks if you want."
+
+
 def _matches_tags(text: str, tags: list[str]) -> bool:
     if not tags:
         return True
@@ -896,54 +936,14 @@ def build_outreach_message(
     requester_profile: Optional[dict] = None,
 ) -> str:
     """Prompt C - Outreach Message Generator."""
-    if settings.TEST_MODE:
-        topic = tags[0] if tags else "this"
-        name = requester_profile.get("full_name") if requester_profile else "a student"
-        return (
-            f"yo! quick q from Link - {name} asked about {topic}. "
-            "if you're down for an intro, reply YES. where'd you hear about it?"
-        )
-    requester_text = ""
-    if requester_profile:
-        requester_text = (
-            f"Requester profile (public): name={requester_profile.get('full_name')}, "
-            f"username={requester_profile.get('username')}, "
-            f"major={requester_profile.get('major')}, "
-            f"bio={requester_profile.get('bio')}, "
-            f"interests={requester_profile.get('interests')}"
-        )
-    prompt = f"""Write a short outreach DM to a student. Sound like a Gen Z college friend: casual, warm, concise.
-
-Query: "{question}"
-Intent: {intent}
-Tags: {tags}
-{requester_text}
-Style: {style_instructions}
-
-Return JSON:
-{{
-  "dm_text": "...",
-  "evidence_request": "Where did you hear this?",
-  "questions": ["..."]
-}}
-"""
-    result = llm_json(prompt, temperature=0)
-    dm_text = (result.get("dm_text") or "").strip()
-    evidence_request = (result.get("evidence_request") or "").strip()
-    questions = result.get("questions") or []
-
-    if not dm_text:
-        topic = tags[0] if tags else "this"
-        name = requester_profile.get("full_name") if requester_profile else "a student"
-        dm_text = (
-            f"yo! quick q from Link - {name} asked about {topic}. "
-            "if you're down for an intro, reply YES."
-        )
-    if evidence_request:
-        dm_text = f"{dm_text} {evidence_request}".strip()
-    if questions:
-        dm_text = f"{dm_text} {' '.join(q.strip() for q in questions if q)}".strip()
-    return dm_text
+    topic = tags[0] if tags else "this"
+    name = requester_profile.get("full_name") if requester_profile else "a student"
+    reason = question or topic
+    # Keep outreach concise and consent-focused.
+    return (
+        f"yo! quick q from Link - {name} is looking for {reason}. "
+        "if you're down for an intro, reply YES. if not, reply NO."
+    )
 
 
 def extract_and_rank_replies(replies: list[dict], original_query: str, style_instructions: str = "") -> dict:
@@ -1539,7 +1539,7 @@ def resolve_consent(
                 convo_id,
                 link_sender_id,
                 "Connected - I made a chat.",
-                {"shareType": "text", "run_id": run_id},
+                {"shareType": "text", "run_id": run_id, "run_status": "done"},
             )
         return {"status": "done", "conversation_id": convo["id"]}
 
@@ -1613,6 +1613,6 @@ def resolve_consent(
             convo_id,
             link_sender_id,
             "No worries - I won't connect you.",
-            {"shareType": "text", "run_id": run_id},
+            {"shareType": "text", "run_id": run_id, "run_status": "done"},
         )
     return {"status": "failed"}

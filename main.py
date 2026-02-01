@@ -213,22 +213,31 @@ async def link_agent(request: LinkAgentRequest):
                     reply = f"i'm asking about: \"{active_run.get('query')}\" — want me to check in?"
                 else:
                     reply = "no active asks right now — want me to find something?"
+            elif "did you text" in lower or "did you message" in lower:
+                if active_run and active_run.get("query"):
+                    reply = f"yep — i texted a few people about \"{active_run.get('query')}\"."
+                else:
+                    reply = "not yet — want me to ask around?"
             else:
-                reply = link_orchestrator.generate_small_talk_response(
-                    request.message_text, user_memory
-                )
-                name = profile.get("full_name") if profile else None
-                if name:
-                    reply = f"yo {name.split()[0]} - {reply}"
+                smalltalk_type = link_orchestrator.classify_smalltalk(request.message_text)
+                if smalltalk_type == "capabilities":
+                    reply = link_orchestrator.generate_capabilities_response(request.message_text, user_memory)
+                else:
+                    reply = link_orchestrator.generate_small_talk_response(
+                        request.message_text, user_memory
+                    )
+                    name = profile.get("full_name") if profile else None
+                    if name:
+                        reply = f"yo {name.split()[0]} - {reply}"
                 memories = (user_memory or {}).get("conversation_state", {}).get("memories") or []
                 for mem in reversed(memories):
                     if mem.startswith("name:"):
                         remembered = mem.split("name:", 1)[-1].strip()
-                        if remembered:
+                        if remembered and "yo " not in reply:
                             reply = f"yo {remembered.title()} - {reply}"
                             break
             if active_run and active_run.get("query") and "what are you asking" not in lower:
-                reply = f"{reply} btw i'm still asking about \"{active_run.get('query')}\" — want me to check in?"
+                reply = f"{reply} btw i'm still asking about \"{active_run.get('query')}\". want me to check in?"
             link_orchestrator.insert_link_response(
                 convo["id"],
                 request.university_id,
@@ -254,6 +263,19 @@ async def link_agent(request: LinkAgentRequest):
             return LinkAgentResponse(mode="answered", confidence=0.4, answer_text=clarifying, citations=[])
 
         if not capability.get("can_answer_from_db") and capability.get("needs_outreach"):
+            lower = (request.message_text or "").lower()
+            if lower.strip() in {"yo", "hey", "hi", "sup", "what's up", "whats up"} or len(lower.strip()) <= 3:
+                reply = link_orchestrator.generate_small_talk_response(request.message_text, user_memory)
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.2,
+                    session_id=session["id"] if session else None,
+                )
+                return LinkAgentResponse(mode="answered", confidence=0.2, answer_text=reply, citations=[])
             outreach = link_orchestrator.start_outreach(
                 request.user_id,
                 request.university_id,
