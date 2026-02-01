@@ -763,6 +763,38 @@ def upsert_user_memory(user_id: str, data: dict) -> dict:
         raise exc
 
 
+def create_link_reminder(reminder: dict) -> dict:
+    """Insert a scheduled Link reminder."""
+    client = get_supabase_client()
+    reminder.setdefault("status", "pending")
+    reminder.setdefault("created_at", datetime.utcnow().isoformat() + "Z")
+    reminder.setdefault("updated_at", datetime.utcnow().isoformat() + "Z")
+    return client.table("link_reminders").insert(reminder).execute().data[0]
+
+
+def list_due_link_reminders(from_time: str, to_time: str, university_id: Optional[str] = None) -> list[dict]:
+    """Fetch reminders pending within the provided window."""
+    client = get_supabase_client()
+    query = (
+        client.table("link_reminders")
+        .select("*")
+        .eq("status", "pending")
+        .gte("target_time", from_time)
+        .lte("target_time", to_time)
+    )
+    if university_id:
+        query = query.eq("university_id", university_id)
+    return query.order("target_time").execute().data
+
+
+def mark_link_reminder_sent(reminder_id: str, sent_at: str) -> Optional[dict]:
+    """Mark a reminder as sent."""
+    client = get_supabase_client()
+    payload = {"status": "sent", "sent_at": sent_at, "updated_at": datetime.utcnow().isoformat() + "Z"}
+    result = client.table("link_reminders").update(payload).eq("id", reminder_id).execute()
+    return result.data[0] if result.data else None
+
+
 # ============ Link Conversation State ============
 
 def get_link_conversation_state(user_id: str, conversation_id: str) -> Optional[dict]:

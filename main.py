@@ -4,7 +4,7 @@ from fastapi import FastAPI, Header, HTTPException
 import re
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from config import settings
@@ -34,6 +34,8 @@ from schemas import (
     LinkRelayStartRequest,
     LinkRelayCollectRequest,
     LinkRelayResponse,
+    LinkReminderRequest,
+    LinkReminderResponse,
 )
 import link_logic
 import link_orchestrator
@@ -1414,6 +1416,28 @@ async def link_relay_collect(request: LinkRelayCollectRequest):
         return LinkRelayResponse(status=result.get("status"), run_id=request.run_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/reminders", response_model=LinkReminderResponse)
+async def schedule_link_reminder(request: LinkReminderRequest):
+    """Schedule a Link reminder for a future check-in."""
+    validate_uuid(request.user_id, "user_id")
+    validate_uuid(request.university_id, "university_id")
+    target_time = request.target_time
+    if target_time.tzinfo is None:
+        target_time = target_time.replace(tzinfo=timezone.utc)
+    else:
+        target_time = target_time.astimezone(timezone.utc)
+    reminder = db.create_link_reminder(
+        {
+            "user_id": request.user_id,
+            "university_id": request.university_id,
+            "target_time": target_time.isoformat(),
+            "message_text": request.message_text
+            or "yo twin, how did the presentation go? hope you killed it.",
+        }
+    )
+    return LinkReminderResponse(reminder_id=reminder.get("id"))
 
 
 # ============ Outreach Endpoints ============

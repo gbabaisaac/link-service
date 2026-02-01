@@ -1,6 +1,7 @@
 """Pydantic models for Link AI API."""
 
 from typing import Optional
+from datetime import datetime
 from pydantic import BaseModel
 
 
@@ -126,6 +127,15 @@ class LinkRelayCollectRequest(BaseModel):
     university_id: str
     session_id: Optional[str] = None
 
+class LinkReminderRequest(BaseModel):
+    user_id: str
+    university_id: str
+    target_time: datetime
+    message_text: Optional[str] = None
+
+
+class LinkReminderResponse(BaseModel):
+    reminder_id: str
 
 # ============ Response Models ============
 
