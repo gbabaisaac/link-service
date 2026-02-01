@@ -127,6 +127,82 @@ def build_conversation_history(conversation_id: str, limit: int = 20) -> str:
     return "\n".join(parts)
 
 
+def persist_last_db_response(state_id: str, db_result: dict) -> dict:
+    """Save the last DB-derived response to the conversation state."""
+    if not state_id or not db_result:
+        return {}
+    payload = {
+        "last_db_response": {
+            "type": db_result.get("type"),
+            "items": db_result.get("items"),
+            "answer_text": db_result.get("answer_text"),
+        },
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    return db.update_link_conversation_state(state_id, payload)
+
+
+def should_replay_last_response(message_text: str) -> bool:
+    """Decide whether the user is asking to reshow previous DB results."""
+    lower = (message_text or "").lower()
+    keywords = ["show", "them", "events", "orgs", "clubs", "people", "friends"]
+    return any(k in lower for k in keywords)
+
+
+def replay_last_db_response(
+    convo_state: dict,
+    question: str,
+    conversation_id: str,
+    university_id: str,
+    session: Optional[dict],
+) -> Optional[LinkAgentResponse]:
+    last = (convo_state or {}).get("last_db_response") or {}
+    if not last or not last.get("items"):
+        return None
+    if not should_replay_last_response(question):
+        return None
+    reply = last.get("answer_text") or "here's what i found earlier:"
+    answer_type = last.get("type")
+    link_sender = (db.get_link_system_profile(university_id) or {}).get("link_user_id")
+    if link_sender:
+        db.insert_link_message(
+            conversation_id,
+            link_sender,
+            reply,
+            {"shareType": "text", "task_state": "answered"},
+            session_id=session["id"] if session else None,
+        )
+    cards_payload = {}
+    if answer_type == "list_orgs":
+        cards_payload = {"club_ids": [o.get("id") for o in (last.get("items") or []) if o.get("id")]}
+        type_name = "organization"
+    elif answer_type == "list_events":
+        cards_payload = {"event_ids": [e.get("id") for e in (last.get("items") or []) if e.get("id")]}
+        type_name = "event"
+    elif answer_type == "list_people":
+        cards_payload = {"user_ids": [p.get("id") for p in (last.get("items") or []) if p.get("id")]}
+        type_name = "profile"
+    else:
+        type_name = None
+    if type_name:
+        link_orchestrator.insert_cards_from_items(
+            conversation_id,
+            university_id,
+            last.get("items") or [],
+            type_name,
+            session_id=session["id"] if session else None,
+        )
+    return LinkAgentResponse(
+        mode="answered",
+        confidence=0.7,
+        answer_text=reply,
+        citations=[],
+        cards=cards_payload,
+        task=None,
+        ui=build_ui_hints("conversation", None),
+    )
+
+
 @app.on_event("startup")
 async def startup_tasks():
     """Optional startup tasks."""
@@ -571,7 +647,7 @@ async def link_agent(request: LinkAgentRequest):
                         "items": orgs[:2],
                         "citations": [{"type": "club", "id": o.get("id")} for o in orgs[:2]],
                         "confidence": 0.7,
-                    }
+                }
         if fallback_db_first:
             db_first = fallback_db_first
         if db_first:
@@ -703,6 +779,8 @@ async def link_agent(request: LinkAgentRequest):
                     "profile",
                     session_id=session["id"] if session else None,
                 )
+            if db_first.get("type") in {"list_orgs", "list_events", "list_people"}:
+                convo_state = persist_last_db_response(convo_state["id"], db_first) or convo_state
             resolve_task_state(convo_state, "resolved", query=request.message_text)
             return LinkAgentResponse(
                 mode="answered",
@@ -713,6 +791,15 @@ async def link_agent(request: LinkAgentRequest):
                 task=None,
                 ui=build_ui_hints("conversation", None),
             )
+        replay = replay_last_db_response(
+            convo_state,
+            request.message_text,
+            convo["id"],
+            request.university_id,
+            session,
+        )
+        if replay:
+            return replay
         # If it's a non-people query and we didn't find anything, ask to clarify rather than outreach.
         if intent_result.intent in {
             Intent.CLUB_SEARCH,

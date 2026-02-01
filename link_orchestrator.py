@@ -1314,15 +1314,18 @@ def build_outreach_message(
     tags: list[str],
     style_instructions: str = "",
     requester_profile: Optional[dict] = None,
+    requester_display_name: Optional[str] = None,
 ) -> str:
     """Prompt C - Outreach Message Generator."""
-    topic = tags[0] if tags else "this"
-    name = requester_profile.get("full_name") if requester_profile else "a student"
-    reason = question or topic
-    # Keep outreach concise and consent-focused.
+    display_name = requester_display_name or (
+        requester_profile.get("full_name") if requester_profile else "a student"
+    )
+    topic_text = ", ".join(tags) if tags else question or "this"
+    verb = "study" if any("study" in t for t in tags + [question or ""]) else "connect"
+    reason = f"{verb} {topic_text}" if topic_text else question or "this topic"
     return (
-        f"yo! quick q from Link - {name} is looking for {reason}. "
-        "if you're down for an intro, reply YES. if not, reply NO."
+        f"hey! {display_name} is looking for someone to {reason}. i'll drop their profile below. "
+        "reply YES if you're open to an intro, NO if not."
     )
 
 
@@ -1493,12 +1496,18 @@ def start_outreach(
         requester_profile = None
     requester_memory = db.get_user_memory(user_id) or {}
     preferred_name = (requester_memory.get("known_preferences") or {}).get("preferred_name")
+    display_name = preferred_name or (requester_profile.get("full_name") if requester_profile else None)
+    if display_name:
+        display_name = display_name.split()[0]
+    else:
+        display_name = "a student"
     dm_text = build_outreach_message(
         question,
         intent.get("intent"),
         tags,
         style_instructions=style_instructions,
         requester_profile=requester_profile,
+        requester_display_name=display_name,
     )
     if preferred_name and requester_profile:
         dm_text = dm_text.replace(requester_profile.get("full_name") or "", preferred_name)
@@ -1678,12 +1687,16 @@ def collect_outreach(
             requester_profile = db.get_profile_rls(access_token, run.get("requester_user_id"))
             if requester_profile and not requester_profile.get("yearbook_visible", True):
                 requester_profile = None
+            requester_display_name = "a student"
+            if requester_profile and requester_profile.get("full_name"):
+                requester_display_name = requester_profile.get("full_name").split()[0]
             dm_text = build_outreach_message(
                 run.get("query"),
                 run.get("intent"),
                 (run.get("intent_payload") or {}).get("tags") or [],
                 style_instructions=build_style_instructions(None),
                 requester_profile=requester_profile,
+                requester_display_name=requester_display_name,
             )
             existing_targets = {t.get("target_user_id") for t in targets}
             new_rows: list[dict] = []
@@ -1741,6 +1754,9 @@ def collect_outreach(
             requester_profile = db.get_profile(run.get("requester_user_id"), enforce_public=True)
             if requester_profile and not requester_profile.get("yearbook_visible", True):
                 requester_profile = None
+            requester_display_name = "a student"
+            if requester_profile and requester_profile.get("full_name"):
+                requester_display_name = requester_profile.get("full_name").split()[0]
             more_targets = outreach_logic.select_outreach_targets(
                 requester_id=run.get("requester_user_id"),
                 university_id=university_id,
@@ -1756,6 +1772,7 @@ def collect_outreach(
                 (run.get("intent_payload") or {}).get("tags") or [],
                 style_instructions=build_style_instructions(None),
                 requester_profile=requester_profile,
+                requester_display_name=requester_display_name,
             )
             new_rows: list[dict] = []
             for target in more_targets:
@@ -1954,7 +1971,13 @@ def resolve_consent(
         )
         db.add_conversation_participants(convo["id"], [requester_user_id, target_user_id])
 
-        intro = "Intro: you both mentioned you're into this - I'll let you take it from here."
+        reason = run.get("query") or "this topic"
+        requester_display = requester_profile.get("full_name") if requester_profile else "someone"
+        requester_display = requester_display.split()[0] if requester_display else "someone"
+        intro = (
+            f"Intro: {requester_display} asked me to connect you about \"{reason}\" — "
+            "I'll step back now."
+        )
         if link_sender_id:
             db.insert_message(convo["id"], link_sender_id, intro, {"shareType": "text"})
 
