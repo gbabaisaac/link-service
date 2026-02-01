@@ -178,8 +178,11 @@ async def link_agent(request: LinkAgentRequest):
         style_instructions = link_orchestrator.build_style_instructions(user_memory)
 
         intent = link_orchestrator.route_intent(request.message_text)
-        if intent["intent"] == "casual_chat":
-            reply = "hey! want help finding people, events, or clubs on campus?"
+        mode = link_orchestrator.determine_mode(request.message_text, intent)
+        if mode == "conversation":
+            reply = link_orchestrator.generate_small_talk_response(
+                request.message_text, user_memory
+            )
             link_orchestrator.insert_link_response(
                 convo["id"],
                 request.university_id,
@@ -263,6 +266,17 @@ async def link_agent(request: LinkAgentRequest):
                 answer.get("answer_text") or "",
                 confidence,
             )
+            follow_up = link_orchestrator.generate_friend_checkin(user_memory)
+            if follow_up:
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    follow_up,
+                    citations=[],
+                    cards={},
+                    confidence=0.2,
+                    session_id=session["id"] if session else None,
+                )
             return LinkAgentResponse(
                 mode="answered",
                 confidence=confidence,
@@ -282,6 +296,17 @@ async def link_agent(request: LinkAgentRequest):
                 confidence=confidence,
                 session_id=session["id"] if session else None,
             )
+            follow_up = link_orchestrator.generate_friend_checkin(user_memory)
+            if follow_up:
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    follow_up,
+                    citations=[],
+                    cards={},
+                    confidence=0.2,
+                    session_id=session["id"] if session else None,
+                )
             return LinkAgentResponse(mode="answered", confidence=confidence, answer_text=clarifying, citations=[])
 
         outreach = link_orchestrator.start_outreach(

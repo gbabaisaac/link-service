@@ -110,6 +110,7 @@ def update_user_style_memory(user_id: str, university_id: str, message_text: str
     detected = existing.get("detected_style") or {}
     vocab = existing.get("vocabulary_patterns") or {}
     examples = existing.get("style_examples") or []
+    conversation_state = existing.get("conversation_state") or {}
 
     features = analyze_message_style(message_text)
     count = int(existing.get("messages_analyzed") or 0)
@@ -133,6 +134,8 @@ def update_user_style_memory(user_id: str, university_id: str, message_text: str
 
     style_confidence = min(1.0, (count + 1) / 10.0)
 
+    conversation_state = update_conversation_state(conversation_state, message_text)
+
     payload = {
         "university_id": university_id,
         "last_interaction_at": "now()",
@@ -142,6 +145,7 @@ def update_user_style_memory(user_id: str, university_id: str, message_text: str
         "detected_style": merged,
         "vocabulary_patterns": {"common_slang": sorted(slang)},
         "style_examples": examples,
+        "conversation_state": conversation_state,
     }
     known_preferences = existing.get("known_preferences")
     if known_preferences is not None:
@@ -176,6 +180,99 @@ def build_style_instructions(user_memory: Optional[dict]) -> str:
     return " ".join([baseline, f"Mirror the user's style: {casing}.", length_hint, emoji_hint, slang_hint]).strip()
 
 
+def update_conversation_state(state: dict, message_text: str) -> dict:
+    """Track lightweight conversation context (classes, exams, mood, goals)."""
+    text = (message_text or "").lower()
+    state = state or {}
+    topics = set(state.get("topics", []) or [])
+    goals = set(state.get("goals", []) or [])
+    classes = set(state.get("classes", []) or [])
+
+    for course in _extract_course_tags(message_text):
+        classes.add(course)
+        topics.add("classes")
+
+    if any(x in text for x in ["exam", "midterm", "final", "quiz"]):
+        topics.add("exams")
+    if any(x in text for x in ["class", "lecture", "prof", "homework", "hw"]):
+        topics.add("classes")
+    if any(x in text for x in ["friends", "friend group", "group chat", "hang", "party"]):
+        topics.add("friends")
+    if any(x in text for x in ["stressed", "tired", "burnt", "burned", "anxious"]):
+        state["mood"] = "stressed"
+    if any(x in text for x in ["excited", "hyped", "pumped"]):
+        state["mood"] = "excited"
+
+    if any(x in text for x in ["looking for", "need", "help with", "trying to"]):
+        goals.add(text[:80])
+
+    state["topics"] = sorted(topics)
+    state["goals"] = list(goals)[-5:]
+    state["classes"] = sorted(classes)
+    state["last_message_at"] = _now_utc().isoformat()
+    return state
+
+
+def determine_mode(message_text: str, intent: dict) -> str:
+    """Pick conversation vs agent mode based on intent and message content."""
+    text = (message_text or "").lower()
+    if intent.get("intent") in {"event_search", "person_search", "club_search", "campus_info"}:
+        return "agent"
+    if any(x in text for x in ["find", "anyone", "who", "where", "when", "help me", "recommend"]):
+        return "agent"
+    return "conversation"
+
+
+def generate_friend_checkin(user_memory: Optional[dict]) -> str:
+    """Return a short friend-like check-in based on memory."""
+    state = (user_memory or {}).get("conversation_state") or {}
+    topics = state.get("topics", []) or []
+    classes = state.get("classes", []) or []
+    mood = state.get("mood")
+
+    if mood == "stressed":
+        return "how you holding up? you good?"
+    if "exams" in topics:
+        return "how'd that exam go?"
+    if classes:
+        return f"how's {classes[-1]} going?"
+    if "friends" in topics:
+        return "how's your friend group lately?"
+    return "how's your day been?"
+
+
+def generate_small_talk_response(message_text: str, user_memory: Optional[dict]) -> str:
+    """Generate a casual, friend-like response without making factual claims."""
+    text = (message_text or "").strip().lower()
+    prefs = (user_memory or {}).get("known_preferences") or {}
+    likes = prefs.get("likes") or []
+    like_hint = f"btw you still into {likes[0]}?" if likes else ""
+
+    if settings.TEST_MODE:
+        if any(x in text for x in ["who am i", "do you know me"]):
+            return "you tell me 😅 give me the tea"
+        if any(x in text for x in ["yo", "hey", "hi", "sup", "what's up", "whats up"]):
+            return "yo! what's good? " + like_hint
+        if "?" in text:
+            return "gotchu — tell me a lil more and i'll help"
+        return "say less, what's the vibe?"
+
+    style_instructions = build_style_instructions(user_memory)
+    prompt = f"""Write a friendly, creative small-talk reply. Do NOT claim facts or info you don't have. Keep it short and warm.
+
+User message: "{message_text}"
+Style: {style_instructions}
+Optional follow-up: {like_hint}
+
+Return JSON:
+{{"message": "..."}}"""
+    result = llm_json(prompt, temperature=0.7)
+    msg = (result.get("message") or "").strip()
+    if not msg:
+        return "yo! what's the vibe?"
+    return msg
+
+
 def _matches_tags(text: str, tags: list[str]) -> bool:
     if not tags:
         return True
@@ -185,6 +282,9 @@ def _matches_tags(text: str, tags: list[str]) -> bool:
 
 def route_intent(message_text: str, user_context: Optional[dict] = None) -> dict:
     """Prompt A - Intent Router."""
+    heuristic = _heuristic_intent(message_text)
+    if heuristic:
+        return heuristic
     context = ""
     if user_context:
         context = f"User context: {user_context}"
@@ -236,6 +336,35 @@ def _fallback_intent(message_text: str) -> str:
     if any(x in text for x in ["where", "when", "what time", "info"]):
         return "campus_info"
     return "casual_chat"
+
+
+def _extract_course_tags(text: str) -> list[str]:
+    matches = re.findall(r"[A-Za-z]{2,4}\\s?\\d{2,4}", text or "")
+    return [m.replace(" ", "").lower() for m in matches]
+
+
+def _heuristic_intent(message_text: str) -> Optional[dict]:
+    text = (message_text or "").lower()
+    course_tags = _extract_course_tags(message_text)
+    if course_tags:
+        return {
+            "intent": "person_search",
+            "tags": course_tags,
+            "time_window": None,
+            "needs_outreach": True,
+        }
+    if any(x in text for x in ["anyone", "who", "tutor", "help me", "can help", "study with", "group"]):
+        tags = []
+        if "csc" in text or "cs" in text:
+            tags.append("cs")
+        tags.extend(course_tags)
+        return {
+            "intent": "person_search",
+            "tags": [t for t in tags if t],
+            "time_window": None,
+            "needs_outreach": True,
+        }
+    return None
 
 
 def _filter_events(events: list[dict], tags: list[str], time_window: Optional[str]) -> list[dict]:
