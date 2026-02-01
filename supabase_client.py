@@ -83,6 +83,90 @@ def get_profile_rls(access_token: str, user_id: str) -> Optional[dict]:
     return result.data if result.data else None
 
 
+def get_user_context_rls(access_token: str, user_id: str) -> dict:
+    """Fetch user profile + classes + clubs with RLS (best effort)."""
+    client = get_rls_client(access_token)
+    profile = (
+        client.table("profiles")
+        .select("*")
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+    classes: list[dict] = []
+    clubs: list[dict] = []
+    try:
+        enrollments = (
+            client.table("user_class_enrollments")
+            .select("class_id")
+            .eq("user_id", user_id)
+            .execute()
+            .data
+        )
+        class_ids = [e.get("class_id") for e in enrollments if e.get("class_id")]
+        if class_ids:
+            classes = client.table("classes").select("*").in_("id", class_ids).execute().data
+    except Exception:
+        classes = []
+    try:
+        memberships = (
+            client.table("org_members")
+            .select("org_id")
+            .eq("user_id", user_id)
+            .execute()
+            .data
+        )
+        org_ids = [m.get("org_id") for m in memberships if m.get("org_id")]
+        if org_ids:
+            clubs = client.table("organizations").select("*").in_("id", org_ids).execute().data
+    except Exception:
+        clubs = []
+    return {"profile": profile, "classes": classes, "clubs": clubs}
+
+
+def get_user_context(user_id: str) -> dict:
+    """Fetch user profile + classes + clubs with service role (best effort)."""
+    client = get_supabase_client()
+    profile = (
+        client.table("profiles")
+        .select("*")
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+        .data
+    )
+    classes: list[dict] = []
+    clubs: list[dict] = []
+    try:
+        enrollments = (
+            client.table("user_class_enrollments")
+            .select("class_id")
+            .eq("user_id", user_id)
+            .execute()
+            .data
+        )
+        class_ids = [e.get("class_id") for e in enrollments if e.get("class_id")]
+        if class_ids:
+            classes = client.table("classes").select("*").in_("id", class_ids).execute().data
+    except Exception:
+        classes = []
+    try:
+        memberships = (
+            client.table("org_members")
+            .select("org_id")
+            .eq("user_id", user_id)
+            .execute()
+            .data
+        )
+        org_ids = [m.get("org_id") for m in memberships if m.get("org_id")]
+        if org_ids:
+            clubs = client.table("organizations").select("*").in_("id", org_ids).execute().data
+    except Exception:
+        clubs = []
+    return {"profile": profile, "classes": classes, "clubs": clubs}
+
+
 def get_link_system_profile(university_id: str) -> Optional[dict]:
     """Fetch Link system profile for a university."""
     client = get_supabase_client()
@@ -336,6 +420,15 @@ def insert_link_message(
         payload["session_id"] = session_id
     result = client.table("link_messages").insert(payload).execute()
     return result.data[0] if result.data else None
+
+
+def list_recent_link_messages(conversation_id: str, sender_type: Optional[str] = None, limit: int = 5) -> list[dict]:
+    """Fetch recent Link messages for dedup/style hints."""
+    client = get_supabase_client()
+    query = client.table("link_messages").select("*").eq("conversation_id", conversation_id)
+    if sender_type:
+        query = query.eq("sender_type", sender_type)
+    return query.order("created_at", desc=True).limit(limit).execute().data
 
 
 def set_link_conversation_session(conversation_id: str, session_id: str) -> None:

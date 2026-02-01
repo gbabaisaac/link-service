@@ -154,7 +154,10 @@ def update_user_style_memory(user_id: str, university_id: str, message_text: str
         "style_examples": examples,
         "conversation_state": conversation_state,
     }
-    known_preferences = existing.get("known_preferences")
+    known_preferences = existing.get("known_preferences") or {}
+    preferred_name = conversation_state.get("preferred_name")
+    if preferred_name:
+        known_preferences["preferred_name"] = preferred_name
     if known_preferences is not None:
         payload["known_preferences"] = known_preferences
 
@@ -218,6 +221,13 @@ def update_conversation_state(state: dict, message_text: str) -> dict:
         name = text.split("my name is ", 1)[-1].split(".")[0].strip()
         if name:
             memories.append(f"name:{name}")
+            state["preferred_name"] = name
+    preferred_match = re.search(r"(call me|i go by|you can call me|call me)\s+([a-zA-Z0-9_'-]{1,16})", text)
+    if preferred_match:
+        preferred = preferred_match.group(2).strip()
+        if preferred:
+            state["preferred_name"] = preferred
+            memories.append(f"preferred_name:{preferred}")
     if "i like " in text or "i love " in text or "i'm into " in text:
         memories.append(f"likes:{text[:80]}")
     if "i went to" in text or "i went" in text:
@@ -284,7 +294,28 @@ def should_ask_class_checkin(user_memory: Optional[dict]) -> Optional[str]:
     return classes[-1]
 
 
-def generate_small_talk_response(message_text: str, user_memory: Optional[dict]) -> str:
+def build_vibe_instructions(recent_user_messages: list[str]) -> str:
+    """Create short vibe-matching instructions from recent user messages."""
+    if not recent_user_messages:
+        return ""
+    joined = " ".join(recent_user_messages).lower()
+    vibe = []
+    if any(x in joined for x in ["girly", "girl", "omg", "bestie"]):
+        vibe.append("Use softer, feminine-coded language. You can say girly or girl.")
+    if any(x in joined for x in ["lol", "lmao", "lmfao", "haha"]):
+        vibe.append("Keep it playful and light.")
+    if any(x in joined for x in ["hbu", "wyd", "wya", "wassup", "sup"]):
+        vibe.append("Be super casual and short.")
+    if any(c in joined for c in [":)", "😂", "🥹", "😭", "💀", "✨", "💅"]):
+        vibe.append("Match emoji usage lightly (0-2).")
+    return " ".join(vibe)
+
+
+def generate_small_talk_response(
+    message_text: str,
+    user_memory: Optional[dict],
+    recent_user_messages: Optional[list[str]] = None,
+) -> str:
     """Generate a casual, friend-like response without making factual claims."""
     text = (message_text or "").strip().lower()
     prefs = (user_memory or {}).get("known_preferences") or {}
@@ -301,10 +332,12 @@ def generate_small_talk_response(message_text: str, user_memory: Optional[dict])
         return "say less, what's the vibe?"
 
     style_instructions = build_style_instructions(user_memory)
+    vibe_instructions = build_vibe_instructions(recent_user_messages or [])
     prompt = f"""Write a friendly, creative small-talk reply. Do NOT claim facts or info you don't have. Keep it short and warm.
 
 User message: "{message_text}"
 Style: {style_instructions}
+Vibe: {vibe_instructions}
 Optional follow-up: {like_hint}
 
 Return JSON:
@@ -354,6 +387,46 @@ Return JSON:
     result = llm_json(prompt, temperature=0.4)
     msg = (result.get("message") or "").strip()
     return msg or "i can help you find people, clubs, and events, answer campus questions, and connect folks if you want."
+
+
+def dedupe_response(conversation_id: str, text: str, intent_type: str = "general") -> str:
+    """Avoid repeating identical Link messages back-to-back."""
+    try:
+        recent = db.list_recent_link_messages(conversation_id, sender_type="link", limit=3)
+        recent_texts = [r.get("content") or "" for r in recent]
+    except Exception:
+        recent_texts = []
+    def _jaccard(a: str, b: str) -> float:
+        wa = set(re.findall(r"[a-zA-Z0-9']+", (a or "").lower()))
+        wb = set(re.findall(r"[a-zA-Z0-9']+", (b or "").lower()))
+        if not wa or not wb:
+            return 0.0
+        return len(wa & wb) / max(len(wa | wb), 1)
+
+    is_dup = text and text in recent_texts
+    if not is_dup and text:
+        for recent_text in recent_texts:
+            if _jaccard(text, recent_text) >= 0.85:
+                is_dup = True
+                break
+    if is_dup:
+        alternatives = {
+            "outreach_started": [
+                "asking around, give me a sec",
+                "on it. i'll let you know",
+                "reaching out now",
+            ],
+            "general": [
+                "gotchu. what's up?",
+                "say less. what's the move?",
+                "cool. tell me more",
+            ],
+        }
+        choices = alternatives.get(intent_type) or alternatives["general"]
+        for alt in choices:
+            if alt not in recent_texts:
+                return alt
+    return text
 
 
 def _matches_tags(text: str, tags: list[str]) -> bool:
@@ -1122,6 +1195,7 @@ def insert_link_response(
 ) -> None:
     link_profile = db.get_link_system_profile(university_id)
     sender_id = link_profile.get("link_user_id") if link_profile else None
+    text = dedupe_response(conversation_id, text, intent_type="general")
     metadata = {
         "shareType": "text",
         "citations": citations,
@@ -1190,6 +1264,8 @@ def start_outreach(
         requester_profile = db.get_profile(user_id, enforce_public=True)
     if requester_profile and not requester_profile.get("yearbook_visible", True):
         requester_profile = None
+    requester_memory = db.get_user_memory(user_id) or {}
+    preferred_name = (requester_memory.get("known_preferences") or {}).get("preferred_name")
     dm_text = build_outreach_message(
         question,
         intent.get("intent"),
@@ -1197,6 +1273,8 @@ def start_outreach(
         style_instructions=style_instructions,
         requester_profile=requester_profile,
     )
+    if preferred_name and requester_profile:
+        dm_text = dm_text.replace(requester_profile.get("full_name") or "", preferred_name)
 
     batch_size = min(settings.OUTREACH_BATCH_SIZE, 10)
     recent_targets = db.list_recent_outreach_target_ids(user_id, days=7)
@@ -1268,7 +1346,7 @@ def start_outreach(
     db.insert_link_message(
         link_conversation_id,
         sender_id,
-        "not sure yet - i'll ask a few people and report back.",
+        dedupe_response(link_conversation_id, "not sure yet - i'll ask a few people and report back.", intent_type="outreach_started"),
         {
             "shareType": "text",
             "run_id": run["id"],

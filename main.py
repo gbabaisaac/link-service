@@ -81,6 +81,38 @@ def resolve_task_state(state: dict, status: str, query: Optional[str] = None) ->
     )
 
 
+def get_display_name(profile: Optional[dict], user_memory: Optional[dict]) -> Optional[str]:
+    """Choose preferred name if available, else profile first name."""
+    prefs = (user_memory or {}).get("known_preferences") or {}
+    preferred = prefs.get("preferred_name")
+    if preferred:
+        return preferred
+    if profile:
+        full_name = profile.get("full_name") or ""
+        if full_name.strip():
+            return full_name.split()[0]
+    return None
+
+
+def build_task_state(active_task: Optional[dict]) -> Optional[dict]:
+    if not active_task:
+        return None
+    return {
+        "id": active_task.get("id"),
+        "type": active_task.get("type"),
+        "status": active_task.get("status"),
+        "run_id": active_task.get("run_id"),
+    }
+
+
+def build_ui_hints(mode: str, active_task: Optional[dict]) -> dict:
+    return {
+        "show_status_button": mode == "outreach",
+        "show_cancel_button": mode == "outreach",
+        "show_consent_buttons": mode == "awaiting_consent",
+    }
+
+
 @app.on_event("startup")
 async def startup_tasks():
     """Optional startup tasks."""
@@ -207,9 +239,9 @@ async def link_agent(request: LinkAgentRequest):
 
         user_context = None
         if request.access_token:
-            user_context = db.get_profile_rls(request.access_token, request.user_id)
+            user_context = db.get_user_context_rls(request.access_token, request.user_id)
         if not user_context:
-            user_context = db.get_profile(request.user_id, enforce_public=False)
+            user_context = db.get_user_context(request.user_id)
         memory_context = db.get_user_memory(request.user_id) or {}
         convo_state = db.get_or_create_link_conversation_state(request.user_id, convo["id"])
         active_task = convo_state.get("active_task")
@@ -229,8 +261,7 @@ async def link_agent(request: LinkAgentRequest):
             "tags": intent_result.entities,
             "time_window": None,
         }
-        intent["user_context"] = {"profile": user_context, "memory": memory_context}
-        capability = link_orchestrator.route_capability(request.message_text, intent)
+        intent["user_context"] = {"profile": user_context.get("profile"), "classes": user_context.get("classes"), "clubs": user_context.get("clubs"), "memory": memory_context}
         pre_records = None
         db_answerable = False
         if intent_result.intent == Intent.PEOPLE_SEARCH:
@@ -290,7 +321,14 @@ async def link_agent(request: LinkAgentRequest):
                         session_id=session["id"] if session else None,
                         task_state="resolved",
                     )
-                    return LinkAgentResponse(mode="answered", confidence=0.6, answer_text=reply, citations=[])
+                    return LinkAgentResponse(
+                        mode="answered",
+                        confidence=0.6,
+                        answer_text=reply,
+                        citations=[],
+                        task=None,
+                        ui=build_ui_hints("conversation", None),
+                    )
                 # requester declined
                 db.update_link_outreach_run(
                     active_run["id"],
@@ -315,14 +353,98 @@ async def link_agent(request: LinkAgentRequest):
                     session_id=session["id"] if session else None,
                     task_state="resolved",
                 )
-                return LinkAgentResponse(mode="answered", confidence=0.4, answer_text=reply, citations=[])
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.4,
+                answer_text=reply,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
+
+        # DB-first: answer simple queries before any LLM calls.
+        if intent["intent"] != "casual_chat":
+            pre_records = pre_records or link_orchestrator.retrieve_candidates(
+                intent["intent"],
+                intent["tags"],
+                intent["time_window"],
+                request.university_id,
+                access_token=request.access_token,
+            )
+        else:
+            pre_records = pre_records or {"events": [], "orgs": [], "profiles": [], "facts": []}
+        db_first = link_orchestrator.try_db_query(request.message_text, intent["intent"], pre_records)
+        if db_first:
+            if db_first.get("type") == "count_orgs":
+                count = db.get_organizations_count(request.university_id)
+                reply = f"looks like there are {count} orgs on campus."
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.8,
+                    session_id=session["id"] if session else None,
+                    task_state="answered",
+                )
+                resolve_task_state(convo_state, "resolved", query=request.message_text)
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.8,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
+            if db_first.get("type") == "count_events":
+                count = db.get_events_count(request.university_id)
+                reply = f"looks like there are {count} events on campus."
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.8,
+                    session_id=session["id"] if session else None,
+                    task_state="answered",
+                )
+                resolve_task_state(convo_state, "resolved", query=request.message_text)
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.8,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
+            reply = db_first.get("answer_text") or "here's what i found:"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                reply,
+                citations=db_first.get("citations") or [],
+                cards=db_first.get("cards") or {},
+                confidence=db_first.get("confidence", 0.7),
+                session_id=session["id"] if session else None,
+                task_state="answered",
+            )
+            resolve_task_state(convo_state, "resolved", query=request.message_text)
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=db_first.get("confidence", 0.7),
+                answer_text=reply,
+                cards=db_first.get("cards") or {},
+                citations=db_first.get("citations") or [],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
+
+        capability = link_orchestrator.route_capability(request.message_text, intent)
 
         if mode == "conversation":
-            profile = None
-            if request.access_token:
-                profile = db.get_profile_rls(request.access_token, request.user_id)
-            if not profile:
-                profile = db.get_profile(request.user_id, enforce_public=False)
+            profile = user_context.get("profile") if user_context else None
             if any(x in lower for x in ["end that task", "stop asking", "cancel that", "drop that", "stop that"]):
                 if active_run:
                     db.update_link_outreach_run(
@@ -330,15 +452,29 @@ async def link_agent(request: LinkAgentRequest):
                         {"status": "failed", "updated_at": datetime.utcnow().isoformat() + "Z"},
                     )
                 reply = "got it - i'll stop that and just chat."
+            elif "call me" in lower or "i go by" in lower:
+                preferred = None
+                for token in ["call me", "i go by", "you can call me"]:
+                    if token in lower:
+                        preferred = lower.split(token, 1)[-1].strip().split(" ")[0]
+                        break
+                if preferred:
+                    db.upsert_user_memory(
+                        request.user_id,
+                        {"known_preferences": {"preferred_name": preferred}},
+                    )
+                    reply = f"gotchu. i'll call you {preferred}."
+                else:
+                    reply = "gotchu. what should i call you?"
             elif any(x in lower for x in ["who am i", "do you know me", "what do you know about me"]):
                 if profile:
-                    name = profile.get("full_name") or "friend"
+                    display = get_display_name(profile, user_memory) or "friend"
                     username = profile.get("username")
                     major = profile.get("major")
                     interests = profile.get("interests") or []
                     if isinstance(interests, str):
                         interests = [interests]
-                    summary_parts = [f"you're {name}"]
+                    summary_parts = [f"you're {display}"]
                     if username:
                         summary_parts.append(f"(@{username})")
                     if major:
@@ -365,19 +501,14 @@ async def link_agent(request: LinkAgentRequest):
                 if smalltalk_type == "capabilities":
                     reply = link_orchestrator.generate_capabilities_response(request.message_text, user_memory)
                 else:
+                    recent_user_msgs = [
+                        m.get("content")
+                        for m in db.list_recent_link_messages(convo["id"], sender_type="user", limit=5)
+                        if m.get("content")
+                    ]
                     reply = link_orchestrator.generate_small_talk_response(
-                        request.message_text, user_memory
+                        request.message_text, user_memory, recent_user_messages=recent_user_msgs
                     )
-                    name = profile.get("full_name") if profile else None
-                    if name:
-                        reply = f"yo {name.split()[0]} - {reply}"
-                if not profile:
-                    memories = (user_memory or {}).get("conversation_state", {}).get("memories") or []
-                    for mem in reversed(memories):
-                        if mem.startswith("name:"):
-                            remembered = mem.split("name:", 1)[-1].strip()
-                            if remembered and "yo " not in reply:
-                                reply = f"yo {remembered.title()} - {reply}"
             if any(x in lower for x in ["end that task", "stop asking", "cancel that", "drop that", "stop that"]):
                 db.update_link_conversation_state(
                     convo_state["id"],
@@ -397,24 +528,32 @@ async def link_agent(request: LinkAgentRequest):
                 session_id=session["id"] if session else None,
                 task_state="conversation",
             )
-            # Periodic class check-in
-            class_to_check = link_orchestrator.should_ask_class_checkin(user_memory)
-            if class_to_check and not active_run:
-                checkin = f"how was {class_to_check.upper()} today? what'd you learn?"
-                link_orchestrator.insert_link_response(
-                    convo["id"],
-                    request.university_id,
-                    checkin,
-                    citations=[],
-                    cards={},
-                    confidence=0.2,
-                    session_id=session["id"] if session else None,
-                )
-                db.upsert_user_memory(
-                    request.user_id,
-                    {"last_class_checkin": datetime.utcnow().isoformat() + "Z"},
-                )
-            return LinkAgentResponse(mode="answered", confidence=0.2, answer_text=reply, citations=[])
+            # Optional class check-in only when user is already in a check-in vibe.
+            if smalltalk_type == "checkin":
+                class_to_check = link_orchestrator.should_ask_class_checkin(user_memory)
+                if class_to_check and not active_run:
+                    checkin = f"how was {class_to_check.upper()} today? what'd you learn?"
+                    link_orchestrator.insert_link_response(
+                        convo["id"],
+                        request.university_id,
+                        checkin,
+                        citations=[],
+                        cards={},
+                        confidence=0.2,
+                        session_id=session["id"] if session else None,
+                    )
+                    db.upsert_user_memory(
+                        request.user_id,
+                        {"last_class_checkin": datetime.utcnow().isoformat() + "Z"},
+                    )
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.2,
+                answer_text=reply,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
 
         if capability.get("clarify_question"):
             clarifying = capability.get("clarify_question")
@@ -428,9 +567,21 @@ async def link_agent(request: LinkAgentRequest):
                 session_id=session["id"] if session else None,
                 task_state="clarifying",
             )
-            return LinkAgentResponse(mode="answered", confidence=0.4, answer_text=clarifying, citations=[])
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.4,
+                answer_text=clarifying,
+                citations=[],
+                task=build_task_state(active_task),
+                ui=build_ui_hints("agent", active_task),
+            )
 
-        if mode != "agent" and not capability.get("can_answer_from_db") and capability.get("needs_outreach"):
+        if (
+            mode != "agent"
+            and not capability.get("can_answer_from_db")
+            and capability.get("needs_outreach")
+            and intent_result.intent == Intent.PEOPLE_SEARCH
+        ):
             lower = (request.message_text or "").lower()
             if lower.strip() in {"yo", "hey", "hi", "sup", "what's up", "whats up"} or len(lower.strip()) <= 3:
                 reply = link_orchestrator.generate_small_talk_response(request.message_text, user_memory)
@@ -443,7 +594,14 @@ async def link_agent(request: LinkAgentRequest):
                     confidence=0.2,
                     session_id=session["id"] if session else None,
                 )
-                return LinkAgentResponse(mode="answered", confidence=0.2, answer_text=reply, citations=[])
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.2,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
             outreach = link_orchestrator.start_outreach(
                 request.user_id,
                 request.university_id,
@@ -465,7 +623,38 @@ async def link_agent(request: LinkAgentRequest):
                     "updated_at": datetime.utcnow().isoformat() + "Z",
                 },
             )
-            return LinkAgentResponse(mode="outreach_started", confidence=0.4, run_id=outreach["run_id"])
+            return LinkAgentResponse(
+                mode="outreach_started",
+                confidence=0.4,
+                run_id=outreach["run_id"],
+                task=build_task_state(active_task),
+                ui=build_ui_hints("outreach", active_task),
+            )
+        elif (
+            mode != "agent"
+            and not capability.get("can_answer_from_db")
+            and capability.get("needs_outreach")
+            and intent_result.intent != Intent.PEOPLE_SEARCH
+        ):
+            clarifying = "can you be a lil more specific so i can check the db?"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                clarifying,
+                citations=[],
+                cards={},
+                confidence=0.4,
+                session_id=session["id"] if session else None,
+                task_state="clarifying",
+            )
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.4,
+                answer_text=clarifying,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
 
         # Handle simple count questions directly (no outreach)
         q_lower = (request.message_text or "").lower()
@@ -483,7 +672,14 @@ async def link_agent(request: LinkAgentRequest):
                     session_id=session["id"] if session else None,
                 )
                 resolve_task_state(convo_state, "resolved", query=request.message_text)
-                return LinkAgentResponse(mode="answered", confidence=0.8, answer_text=reply, citations=[])
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.8,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
             if any(x in q_lower for x in ["event", "events"]):
                 count = db.get_events_count(request.university_id)
                 reply = f"looks like there are {count} events on campus."
@@ -497,66 +693,16 @@ async def link_agent(request: LinkAgentRequest):
                     session_id=session["id"] if session else None,
                 )
                 resolve_task_state(convo_state, "resolved", query=request.message_text)
-                return LinkAgentResponse(mode="answered", confidence=0.8, answer_text=reply, citations=[])
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.8,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
 
-        records = pre_records or link_orchestrator.retrieve_candidates(
-            intent["intent"],
-            intent["tags"],
-            intent["time_window"],
-            request.university_id,
-            access_token=request.access_token,
-        )
-        db_first = link_orchestrator.try_db_query(request.message_text, intent["intent"], records)
-        if db_first:
-            if db_first.get("type") == "count_orgs":
-                count = db.get_organizations_count(request.university_id)
-                reply = f"looks like there are {count} orgs on campus."
-                link_orchestrator.insert_link_response(
-                    convo["id"],
-                    request.university_id,
-                    reply,
-                    citations=[],
-                    cards={},
-                    confidence=0.8,
-                    session_id=session["id"] if session else None,
-                    task_state="answered",
-                )
-                resolve_task_state(convo_state, "resolved", query=request.message_text)
-                return LinkAgentResponse(mode="answered", confidence=0.8, answer_text=reply, citations=[])
-            if db_first.get("type") == "count_events":
-                count = db.get_events_count(request.university_id)
-                reply = f"looks like there are {count} events on campus."
-                link_orchestrator.insert_link_response(
-                    convo["id"],
-                    request.university_id,
-                    reply,
-                    citations=[],
-                    cards={},
-                    confidence=0.8,
-                    session_id=session["id"] if session else None,
-                    task_state="answered",
-                )
-                resolve_task_state(convo_state, "resolved", query=request.message_text)
-                return LinkAgentResponse(mode="answered", confidence=0.8, answer_text=reply, citations=[])
-            reply = db_first.get("answer_text") or "here's what i found:"
-            link_orchestrator.insert_link_response(
-                convo["id"],
-                request.university_id,
-                reply,
-                citations=db_first.get("citations") or [],
-                cards=db_first.get("cards") or {},
-                confidence=db_first.get("confidence", 0.7),
-                session_id=session["id"] if session else None,
-                task_state="answered",
-            )
-            resolve_task_state(convo_state, "resolved", query=request.message_text)
-            return LinkAgentResponse(
-                mode="answered",
-                confidence=db_first.get("confidence", 0.7),
-                answer_text=reply,
-                cards=db_first.get("cards") or {},
-                citations=db_first.get("citations") or [],
-            )
+        records = pre_records or {"events": [], "orgs": [], "profiles": [], "facts": []}
         cached_facts = records.get("facts") or []
         if cached_facts:
             cached_answer = link_orchestrator.compose_cached_answer(
@@ -583,6 +729,8 @@ async def link_agent(request: LinkAgentRequest):
                     answer_text=cached_answer.get("answer_text"),
                     cards={},
                     citations=cached_answer.get("citations") or [],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
                 )
         answer = link_orchestrator.compose_grounded_answer(
             request.message_text, records, style_instructions=style_instructions
@@ -658,6 +806,8 @@ async def link_agent(request: LinkAgentRequest):
                 answer_text=answer.get("answer_text"),
                 cards=cards,
                 citations=answer.get("citations") or [],
+                task=None,
+                ui=build_ui_hints("conversation", None),
             )
 
         if answer["answer_mode"] == "ask_clarifying":
@@ -694,7 +844,14 @@ async def link_agent(request: LinkAgentRequest):
                     confidence=0.2,
                     session_id=session["id"] if session else None,
                 )
-            return LinkAgentResponse(mode="answered", confidence=confidence, answer_text=clarifying, citations=[])
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=confidence,
+                answer_text=clarifying,
+                citations=[],
+                task=build_task_state(active_task),
+                ui=build_ui_hints("agent", active_task),
+            )
 
         outreach = link_orchestrator.start_outreach(
             request.user_id,
@@ -717,7 +874,13 @@ async def link_agent(request: LinkAgentRequest):
                 "updated_at": datetime.utcnow().isoformat() + "Z",
             },
         )
-        return LinkAgentResponse(mode="outreach_started", confidence=confidence, run_id=outreach["run_id"])
+        return LinkAgentResponse(
+            mode="outreach_started",
+            confidence=confidence,
+            run_id=outreach["run_id"],
+            task=build_task_state(active_task),
+            ui=build_ui_hints("outreach", active_task),
+        )
     except HTTPException:
         raise
     except Exception as e:

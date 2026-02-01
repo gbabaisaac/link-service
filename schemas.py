@@ -226,6 +226,21 @@ class ConnectResponse(BaseModel):
     intro_message: str
 
 
+class TaskState(BaseModel):
+    """Active task state for Link UI."""
+    id: Optional[str] = None
+    type: Optional[str] = None
+    status: Optional[str] = None
+    run_id: Optional[str] = None
+
+
+class UIHints(BaseModel):
+    """UI rendering hints for frontend."""
+    show_status_button: bool = False
+    show_cancel_button: bool = False
+    show_consent_buttons: bool = False
+
+
 class LinkAgentResponse(BaseModel):
     """Response from /link/agent endpoint."""
     mode: str
@@ -234,6 +249,8 @@ class LinkAgentResponse(BaseModel):
     answer_text: Optional[str] = None
     cards: Optional[dict] = None
     citations: list[dict] = []
+    task: Optional[TaskState] = None
+    ui: Optional[UIHints] = None
 
 
 class LinkOutreachCollectResponse(BaseModel):
