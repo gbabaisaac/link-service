@@ -387,7 +387,6 @@ async def link_agent(request: LinkAgentRequest):
                         "updated_at": datetime.utcnow().isoformat() + "Z",
                     },
                 )
-                                break
             link_orchestrator.insert_link_response(
                 convo["id"],
                 request.university_id,
