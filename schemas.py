@@ -112,6 +112,21 @@ class LinkConsentResolveRequest(BaseModel):
     target_ok: bool
 
 
+class LinkRelayStartRequest(BaseModel):
+    requester_user_id: str
+    requester_conversation_id: str
+    target_user_id: str
+    university_id: str
+    question: str
+    session_id: Optional[str] = None
+
+
+class LinkRelayCollectRequest(BaseModel):
+    run_id: str
+    university_id: str
+    session_id: Optional[str] = None
+
+
 # ============ Response Models ============
 
 class Intent(BaseModel):
@@ -264,6 +279,11 @@ class LinkConsentResolveResponse(BaseModel):
     """Response from /link/consent/resolve endpoint."""
     status: str
     conversation_id: Optional[str] = None
+
+
+class LinkRelayResponse(BaseModel):
+    status: str
+    run_id: Optional[str] = None
 
 
 class StyleLearnResponse(BaseModel):

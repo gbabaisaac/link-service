@@ -30,6 +30,9 @@ from schemas import (
     LinkOutreachCollectResponse,
     LinkConsentResolveRequest,
     LinkConsentResolveResponse,
+    LinkRelayStartRequest,
+    LinkRelayCollectRequest,
+    LinkRelayResponse,
 )
 import link_logic
 import link_orchestrator
@@ -270,6 +273,18 @@ async def link_agent(request: LinkAgentRequest):
             Intent.CLUB_SEARCH: "club_search",
             Intent.CAMPUS_INFO: "campus_info",
             Intent.DB_QUERY: "campus_info",
+            Intent.COUNT_QUERY: "campus_info",
+            Intent.FOOD: "campus_info",
+            Intent.HOUSING: "campus_info",
+            Intent.TECH: "campus_info",
+            Intent.SAFETY: "campus_info",
+            Intent.TRANSPORT: "campus_info",
+            Intent.HEALTH: "campus_info",
+            Intent.CAREER: "campus_info",
+            Intent.SPORTS: "campus_info",
+            Intent.STUDY: "campus_info",
+            Intent.SOCIAL: "campus_info",
+            Intent.MARKETPLACE: "campus_info",
             Intent.PROFILE_QUESTION: "casual_chat",
             Intent.PROFILE_CLASSES: "casual_chat",
         }
@@ -346,7 +361,10 @@ async def link_agent(request: LinkAgentRequest):
         if intent_result.intent == Intent.PROFILE_CLASSES:
             classes = (user_context or {}).get("classes") or []
             if classes:
-                names = [c.get("name") or c.get("title") or c.get("code") for c in classes]
+                if isinstance(classes[0], str):
+                    names = classes
+                else:
+                    names = [c.get("name") or c.get("title") or c.get("code") for c in classes]
                 names = [n for n in names if n]
                 reply = "you're taking: " + ", ".join(names[:6]) + "."
             else:
@@ -1077,6 +1095,37 @@ async def link_consent_resolve(request: LinkConsentResolveRequest):
             status=result.get("status"),
             conversation_id=result.get("conversation_id"),
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/relay/start", response_model=LinkRelayResponse)
+async def link_relay_start(request: LinkRelayStartRequest):
+    try:
+        validate_uuid(request.requester_user_id, "requester_user_id")
+        validate_uuid(request.target_user_id, "target_user_id")
+        result = link_orchestrator.start_link_relay(
+            request.requester_user_id,
+            request.requester_conversation_id,
+            request.target_user_id,
+            request.question,
+            request.university_id,
+            session_id=request.session_id,
+        )
+        return LinkRelayResponse(status="awaiting_target", run_id=result.get("run_id"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/relay/collect", response_model=LinkRelayResponse)
+async def link_relay_collect(request: LinkRelayCollectRequest):
+    try:
+        result = link_orchestrator.collect_link_relay(
+            request.run_id,
+            request.university_id,
+            session_id=request.session_id,
+        )
+        return LinkRelayResponse(status=result.get("status"), run_id=request.run_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

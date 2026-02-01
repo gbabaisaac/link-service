@@ -122,6 +122,14 @@ def get_user_context_rls(access_token: str, user_id: str) -> dict:
             clubs = client.table("organizations").select("*").in_("id", org_ids).execute().data
     except Exception:
         clubs = []
+    # Fallback to profile.class_schedule if no class rows
+    if not classes and profile and profile.get("class_schedule"):
+        try:
+            schedule = profile.get("class_schedule") or []
+            if isinstance(schedule, list):
+                classes = schedule
+        except Exception:
+            pass
     return {"profile": profile, "classes": classes, "clubs": clubs}
 
 
@@ -164,6 +172,13 @@ def get_user_context(user_id: str) -> dict:
             clubs = client.table("organizations").select("*").in_("id", org_ids).execute().data
     except Exception:
         clubs = []
+    if not classes and profile and profile.get("class_schedule"):
+        try:
+            schedule = profile.get("class_schedule") or []
+            if isinstance(schedule, list):
+                classes = schedule
+        except Exception:
+            pass
     return {"profile": profile, "classes": classes, "clubs": clubs}
 
 
@@ -474,6 +489,22 @@ def list_link_messages(conversation_id: str, limit: int = 20) -> list[dict]:
     return list(reversed(rows or []))
 
 
+def list_link_messages_for_conversation(
+    conversation_id: str,
+    after: Optional[str] = None,
+    sender_type: Optional[str] = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Fetch link_messages with optional filters."""
+    client = get_supabase_client()
+    query = client.table("link_messages").select("*").eq("conversation_id", conversation_id)
+    if sender_type:
+        query = query.eq("sender_type", sender_type)
+    if after:
+        query = query.gt("created_at", after)
+    return query.order("created_at", desc=False).limit(limit).execute().data
+
+
 def set_link_conversation_session(conversation_id: str, session_id: str) -> None:
     """Attach a Link session to a conversation."""
     client = get_supabase_client()
@@ -576,6 +607,48 @@ def update_link_outreach_target(target_id: str, payload: dict) -> Optional[dict]
     """Update a link outreach target row."""
     client = get_supabase_client()
     result = client.table("link_outreach_targets").update(payload).eq("id", target_id).execute()
+    return result.data[0] if result.data else None
+
+
+# ============ Link Relay (Link-to-Link) ============
+
+def create_link_relay_run(payload: dict) -> dict:
+    client = get_supabase_client()
+    return client.table("link_relay_runs").insert(payload).execute().data[0]
+
+
+def get_link_relay_run(run_id: str) -> Optional[dict]:
+    client = get_supabase_client()
+    result = client.table("link_relay_runs").select("*").eq("id", run_id).maybe_single().execute()
+    return result.data if result.data else None
+
+
+def update_link_relay_run(run_id: str, payload: dict) -> Optional[dict]:
+    client = get_supabase_client()
+    result = client.table("link_relay_runs").update(payload).eq("id", run_id).execute()
+    return result.data[0] if result.data else None
+
+
+def create_link_relay_target(payload: dict) -> dict:
+    client = get_supabase_client()
+    return client.table("link_relay_targets").insert(payload).execute().data[0]
+
+
+def list_link_relay_targets(run_id: str) -> list[dict]:
+    client = get_supabase_client()
+    return (
+        client.table("link_relay_targets")
+        .select("*")
+        .eq("run_id", run_id)
+        .order("sent_at", desc=False)
+        .execute()
+        .data
+    )
+
+
+def update_link_relay_target(target_id: str, payload: dict) -> Optional[dict]:
+    client = get_supabase_client()
+    result = client.table("link_relay_targets").update(payload).eq("id", target_id).execute()
     return result.data[0] if result.data else None
 
 

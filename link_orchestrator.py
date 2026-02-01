@@ -1081,7 +1081,10 @@ def try_db_query(question: str, intent: str, records: dict, tags: Optional[list[
         if any(x in text for x in ["event", "events"]):
             return {"type": "count_events"}
         if "major" in text:
-            major_query = (tags or [None])[0]
+            if "computer science" in text or "comp sci" in text or "compsci" in text or "cs " in text:
+                major_query = "computer science"
+            else:
+                major_query = (tags or [None])[0]
             return {"type": "count_major", "major_query": major_query}
     if "how many" in text and any(x in text for x in ["user", "users", "students", "people"]):
         return {"type": "count_users"}
@@ -1151,6 +1154,101 @@ def insert_cards_from_items(
                 session_id=session_id,
             )
 
+
+def start_link_relay(
+    requester_user_id: str,
+    requester_conversation_id: str,
+    target_user_id: str,
+    question: str,
+    university_id: str,
+    session_id: Optional[str] = None,
+) -> dict:
+    """Ask another user's Link instance a question (no connection)."""
+    run = db.create_link_relay_run(
+        {
+            "requester_user_id": requester_user_id,
+            "requester_conversation_id": requester_conversation_id,
+            "target_user_id": target_user_id,
+            "question": question,
+            "status": "pending",
+        }
+    )
+    target_convo = db.get_or_create_link_conversation(target_user_id)
+    link_profile = db.get_link_system_profile(university_id)
+    sender_id = link_profile.get("link_user_id") if link_profile else None
+    prompt = f"{question} (reply here)"
+    msg = db.insert_link_message(
+        target_convo["id"],
+        sender_id,
+        prompt,
+        {"shareType": "text", "relay_run_id": run["id"]},
+        sender_type="link",
+    )
+    db.create_link_relay_target(
+        {
+            "run_id": run["id"],
+            "dm_conversation_id": target_convo["id"],
+            "outreach_message_id": msg.get("id"),
+            "status": "sent",
+        }
+    )
+    db.update_link_relay_run(run["id"], {"status": "awaiting_target"})
+    # Notify requester
+    insert_link_response(
+        requester_conversation_id,
+        university_id,
+        "gotchu. i'll ask and get back to you.",
+        citations=[],
+        cards={},
+        confidence=0.5,
+        session_id=session_id,
+        task_state="relay",
+    )
+    return {"run_id": run["id"]}
+
+
+def collect_link_relay(run_id: str, university_id: str, session_id: Optional[str] = None) -> dict:
+    """Collect reply from target's Link conversation and relay it."""
+    run = db.get_link_relay_run(run_id)
+    if not run:
+        return {"status": "failed", "message": "Run not found"}
+    targets = db.list_link_relay_targets(run_id)
+    if not targets:
+        return {"status": "failed", "message": "No target"}
+    target = targets[0]
+    replies = db.list_link_messages_for_conversation(
+        target["dm_conversation_id"],
+        after=target.get("sent_at"),
+        sender_type="user",
+        limit=5,
+    )
+    if not replies:
+        return {"status": "awaiting_target"}
+    reply = replies[0]
+    db.update_link_relay_target(
+        target["id"],
+        {
+            "reply_message_id": reply.get("id"),
+            "status": "replied",
+            "updated_at": _now_utc().isoformat(),
+        },
+    )
+    db.update_link_relay_run(
+        run_id,
+        {"status": "answered", "updated_at": _now_utc().isoformat()},
+    )
+    citation = [{"type": "user", "id": run.get("target_user_id"), "message_id": reply.get("id")}]
+    insert_link_response(
+        run.get("requester_conversation_id"),
+        university_id,
+        f"they said: {reply.get('content')}",
+        citations=citation,
+        cards={},
+        confidence=0.6,
+        session_id=session_id,
+        task_state="answered",
+    )
+    return {"status": "answered"}
 
 def build_outreach_message(
     question: str,

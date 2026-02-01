@@ -17,6 +17,19 @@ class Intent(str, Enum):
     CAMPUS_INFO = "campus_info"
     PROFILE_QUESTION = "profile_question"
     PROFILE_CLASSES = "profile_classes"
+    COUNT_QUERY = "count_query"
+    CAMPUS_INFO = "campus_info"
+    FOOD = "food"
+    HOUSING = "housing"
+    TECH = "tech"
+    SAFETY = "safety"
+    TRANSPORT = "transport"
+    HEALTH = "health"
+    CAREER = "career"
+    SPORTS = "sports"
+    STUDY = "study"
+    SOCIAL = "social"
+    MARKETPLACE = "marketplace"
     CONSENT_RESPONSE = "consent_response"
     CANCEL_TASK = "cancel_task"
     UNKNOWN = "unknown"
@@ -88,9 +101,31 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
 
     if any(x in text for x in ["campus", "library", "gym", "dining", "hours", "where is", "where's"]):
         return IntentResult(Intent.CAMPUS_INFO, entities, raw)
+    if any(x in text for x in ["food", "dining", "lunch", "dinner", "menu"]):
+        return IntentResult(Intent.FOOD, entities, raw)
+    if any(x in text for x in ["dorm", "housing", "room", "ra", "maintenance"]):
+        return IntentResult(Intent.HOUSING, entities, raw)
+    if any(x in text for x in ["wifi", "password", "print", "printer", "login", "it"]):
+        return IntentResult(Intent.TECH, entities, raw)
+    if any(x in text for x in ["safe", "police", "escort", "emergency"]):
+        return IntentResult(Intent.SAFETY, entities, raw)
+    if any(x in text for x in ["shuttle", "bus", "ride", "carpool", "parking"]):
+        return IntentResult(Intent.TRANSPORT, entities, raw)
+    if any(x in text for x in ["health", "counseling", "clinic", "therapy"]):
+        return IntentResult(Intent.HEALTH, entities, raw)
+    if any(x in text for x in ["job", "internship", "career", "resume", "career fair"]):
+        return IntentResult(Intent.CAREER, entities, raw)
+    if any(x in text for x in ["sports", "game", "pickup", "intramural", "gym"]):
+        return IntentResult(Intent.SPORTS, entities, raw)
+    if any(x in text for x in ["study", "tutor", "notes", "exam", "midterm"]):
+        return IntentResult(Intent.STUDY, entities, raw)
+    if any(x in text for x in ["party", "concert", "hang", "weekend", "fun"]):
+        return IntentResult(Intent.SOCIAL, entities, raw)
+    if any(x in text for x in ["buy", "sell", "market", "textbook", "bike", "sublet"]):
+        return IntentResult(Intent.MARKETPLACE, entities, raw)
 
     if any(x in text for x in ["how many", "count", "number of"]):
-        return IntentResult(Intent.DB_QUERY, entities, raw)
+        return IntentResult(Intent.COUNT_QUERY, entities, raw)
 
     # If user is responding while an active task exists, treat as followup.
     if active_task:
