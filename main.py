@@ -246,16 +246,18 @@ async def link_agent(request: LinkAgentRequest):
             sender_type="user",
         )
 
-        user_memory = link_orchestrator.update_user_style_memory(
-            request.user_id, request.university_id, request.message_text
-        )
-        style_instructions = link_orchestrator.build_style_instructions(user_memory)
-
         user_context = None
         if request.access_token:
             user_context = db.get_user_context_rls(request.access_token, request.user_id)
         if not user_context:
             user_context = db.get_user_context(request.user_id)
+        resolved_university_id = request.university_id
+        if not resolved_university_id and user_context:
+            resolved_university_id = (user_context.get("profile") or {}).get("university_id")
+        user_memory = link_orchestrator.update_user_style_memory(
+            request.user_id, resolved_university_id, request.message_text
+        )
+        style_instructions = link_orchestrator.build_style_instructions(user_memory)
         memory_context = db.get_user_memory(request.user_id) or {}
         convo_state = db.get_or_create_link_conversation_state(request.user_id, convo["id"])
         active_task = convo_state.get("active_task")

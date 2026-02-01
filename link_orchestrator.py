@@ -114,6 +114,10 @@ def analyze_message_style(text: str) -> dict:
 def update_user_style_memory(user_id: str, university_id: str, message_text: str) -> dict:
     """Update user memory with style profile + Gen Z baseline."""
     existing = db.get_user_memory(user_id) or {}
+    if not university_id:
+        university_id = existing.get("university_id") or (db.get_profile(user_id, enforce_public=False) or {}).get("university_id")
+    if not university_id:
+        return existing or {}
     detected = existing.get("detected_style") or {}
     vocab = existing.get("vocabulary_patterns") or {}
     examples = existing.get("style_examples") or []
