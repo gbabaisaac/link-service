@@ -797,7 +797,141 @@ def mark_link_reminder_sent(reminder_id: str, sent_at: str) -> Optional[dict]:
 
 # ============ Link Conversation State ============
 
+def get_link_conversation_state(conversation_id: str) -> Optional[dict]:
+    """Fetch the state machine for a conversation."""
+    client = get_supabase_client()
+    result = (
+        client.table("link_conversation_state")
+        .select("*")
+        .eq("conversation_id", conversation_id)
+        .maybe_single()
+        .execute()
+    )
+    return result.data if result.data else None
+
+
+def get_or_create_link_conversation_state(user_id: str, conversation_id: str) -> dict:
+    """Get or create the state machine for a conversation."""
+    existing = get_link_conversation_state(conversation_id)
+    if existing:
+        return existing
+        
+    client = get_supabase_client()
+    payload = {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "mode": "idle",
+        "active_task": {},
+        "last_updated": datetime.now(timezone.utc).isoformat()
+    }
+    return client.table("link_conversation_state").insert(payload).execute().data[0]
+
+
+def update_link_conversation_state(conversation_id: str, payload: dict) -> dict:
+    """Update the conversation state (mode, active_task)."""
+    client = get_supabase_client()
+    payload["last_updated"] = datetime.now(timezone.utc).isoformat()
+    result = (
+        client.table("link_conversation_state")
+        .update(payload)
+        .eq("conversation_id", conversation_id)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+# ============ Federated Link Tables ============
+
 def get_link_conversation_state(user_id: str, conversation_id: str) -> Optional[dict]:
+    """Fetch conversation state for a user + link conversation."""
+    client = get_supabase_client()
+    result = (
+        client.table("link_conversation_state")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("conversation_id", conversation_id)
+        .maybe_single()
+        .execute()
+    )
+    return result.data if result.data else None
+
+
+def get_or_create_link_conversation_state(user_id: str, conversation_id: str) -> dict:
+    """Get or create conversation state."""
+    existing = get_link_conversation_state(user_id, conversation_id)
+    if existing:
+        return existing
+    client = get_supabase_client()
+    payload = {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "mode": "conversation",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return client.table("link_conversation_state").insert(payload).execute().data[0]
+
+
+def update_link_conversation_state(state_id: str, payload: dict) -> dict:
+    """Update conversation state."""
+    client = get_supabase_client()
+    return client.table("link_conversation_state").update(payload).eq("id", state_id).execute().data[0]
+
+
+def get_link_sharing_rules(user_id: str) -> dict:
+    """Fetch user's data sharing rules."""
+    client = get_supabase_client()
+    result = client.table("link_sharing_rules").select("*").eq("user_id", user_id).maybe_single().execute()
+    return result.data if result.data else {}
+
+
+def upsert_link_sharing_rules(user_id: str, rules: dict) -> dict:
+    """Update user's sharing rules."""
+    client = get_supabase_client()
+    rules["user_id"] = user_id
+    rules["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return client.table("link_sharing_rules").upsert(rules, on_conflict="user_id").execute().data[0]
+
+
+def get_link_life_events(user_id: str, active_only: bool = True) -> list[dict]:
+    """Fetch user's detected life events."""
+    client = get_supabase_client()
+    query = client.table("link_life_events").select("*").eq("user_id", user_id)
+    if active_only:
+        # Assuming there's a status or date filter for 'active'
+        # For now, just return all, logic can filter by date
+        pass
+    return query.order("detected_at", desc=True).limit(50).execute().data
+
+
+def create_link_life_event(event_data: dict) -> dict:
+    """Record a new life event."""
+    client = get_supabase_client()
+    return client.table("link_life_events").insert(event_data).execute().data[0]
+
+
+def create_cross_request(payload: dict) -> dict:
+    """Create a request from one Link instance to another."""
+    client = get_supabase_client()
+    return client.table("link_cross_requests").insert(payload).execute().data[0]
+
+
+def get_cross_requests_for_user(user_id: str, status: str = "pending") -> list[dict]:
+    """Fetch incoming requests for a user/Link."""
+    client = get_supabase_client()
+    return (
+        client.table("link_cross_requests")
+        .select("*")
+        .eq("target_user_id", user_id)
+        .eq("status", status)
+        .execute()
+        .data
+    )
+
+
+def update_cross_request(request_id: str, payload: dict) -> dict:
+    """Update status/response of a cross-link request."""
+    client = get_supabase_client()
+    return client.table("link_cross_requests").update(payload).eq("id", request_id).execute().data[0]
     """Fetch conversation state for a user + link conversation."""
     client = get_supabase_client()
     result = (
@@ -1038,3 +1172,134 @@ def get_classmates(user_id: str, semester: Optional[str] = None) -> list[str]:
         classmates.extend([r["user_id"] for r in result.data if r["user_id"] != user_id])
     
     return list(set(classmates))
+
+# ============ Phase 2: Memory & Social Intelligence ============
+
+# --- Encrpyted Memory ---
+def create_encrypted_memory(user_id: str, encrypted_value: str, category: str, source: str = "chat") -> dict:
+    client = get_supabase_client()
+    return client.table("link_memory").insert({
+        "user_id": user_id,
+        "encrypted_value": encrypted_value,
+        "category": category,
+        "source": source
+    }).execute().data[0]
+
+def list_encrypted_memories(user_id: str, category: Optional[str] = None) -> list[dict]:
+    client = get_supabase_client()
+    query = client.table("link_memory").select("*").eq("user_id", user_id)
+    if category:
+        query = query.eq("category", category)
+    return query.execute().data
+
+# --- User Vibe ---
+def get_user_vibe(user_id: str) -> Optional[dict]:
+    client = get_supabase_client()
+    result = client.table("link_user_vibe").select("*").eq("user_id", user_id).maybe_single().execute()
+    return result.data if result.data else None
+
+def upsert_user_vibe(user_id: str, payload: dict) -> dict:
+    client = get_supabase_client()
+    payload["user_id"] = user_id
+    payload["last_updated"] = datetime.now(timezone.utc).isoformat()
+    return client.table("link_user_vibe").upsert(payload).execute().data[0]
+
+# --- Life Events ---
+def create_life_event(payload: dict) -> dict:
+    client = get_supabase_client()
+    return client.table("link_life_events").insert(payload).execute().data[0]
+
+def list_active_life_events(user_id: str) -> list[dict]:
+    client = get_supabase_client()
+    return (
+        client.table("link_life_events")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("status", "active")
+        .execute()
+        .data
+    )
+
+# --- Scheduled Jobs (Autonomous) ---
+def create_scheduled_job(payload: dict) -> dict:
+    client = get_supabase_client()
+    payload["status"] = "pending"
+    return client.table("link_scheduled_jobs").insert(payload).execute().data[0]
+
+def list_pending_jobs(limit: int = 50) -> list[dict]:
+    """Fetch pending jobs due for execution (admin/cron usage)."""
+    # Note: This runs with Service Key usually
+    client = get_supabase_client()
+    now = datetime.now(timezone.utc).isoformat()
+    return (
+        client.table("link_scheduled_jobs")
+        .select("*")
+        .eq("status", "pending")
+        .lte("run_at", now)
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+def update_job_status(job_id: str, status: str) -> dict:
+    client = get_supabase_client()
+    return client.table("link_scheduled_jobs").update({"status": status}).eq("id", job_id).execute().data[0]
+
+# ============ Phase 3: Link-to-Link (The Handshake) ============
+
+def create_cross_request(payload: dict) -> dict:
+    """Create a request to another user's Link instance."""
+    client = get_supabase_client()
+    return client.table("link_cross_requests").insert(payload).execute().data[0]
+
+def list_pending_requests(user_id: str) -> list[dict]:
+    """List incoming requests waiting for user consent."""
+    client = get_supabase_client()
+    return (
+        client.table("link_cross_requests")
+        .select("*")
+        .eq("target_user_id", user_id)
+        .eq("status", "pending_consent")
+        .execute()
+        .data
+    )
+
+def update_cross_request(request_id: str, payload: dict) -> dict:
+    """Approve/Reject a request."""
+    client = get_supabase_client()
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return client.table("link_cross_requests").update(payload).eq("id", request_id).execute().data[0]
+
+def get_link_sharing_rules(user_id: str) -> dict:
+    """Fetch user's sharing rules (whitelists/blacklists)."""
+    # Returns a dict structured for easy lookup, e.g. {"auto_approve_friends": True}
+    client = get_supabase_client()
+    rows = client.table("link_sharing_rules").select("*").eq("user_id", user_id).execute().data
+    rules = {}
+    for row in rows:
+        # Simplistic mapping for MVP
+        rules[row["rule_type"]] = row
+    return rules
+
+# ============ Phase 4: Distributed Knowledge ============
+
+def create_knowledge_query(payload: dict) -> dict:
+    """Initiate a distributed query."""
+    client = get_supabase_client()
+    return client.table("link_knowledge_queries").insert(payload).execute().data[0]
+
+def create_knowledge_targets(rows: list[dict]) -> list[dict]:
+    """Add targets to a distributed query."""
+    if not rows: return []
+    client = get_supabase_client()
+    return client.table("link_knowledge_targets").insert(rows).execute().data
+
+def list_knowledge_targets(query_id: str) -> list[dict]:
+    """Fetch status of all targets for a query."""
+    client = get_supabase_client()
+    return client.table("link_knowledge_targets").select("*").eq("query_id", query_id).execute().data
+
+def update_knowledge_target(target_id: str, payload: dict) -> dict:
+    """Update target status (e.g. from pending -> approved)."""
+    client = get_supabase_client()
+    return client.table("link_knowledge_targets").update(payload).eq("id", target_id).execute().data[0]

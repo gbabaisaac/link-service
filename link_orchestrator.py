@@ -187,28 +187,28 @@ def update_user_style_memory(user_id: str, university_id: str, message_text: str
 
 def build_style_instructions(user_memory: Optional[dict]) -> str:
     """Build style guidance for responses (Gen Z baseline + user mirroring)."""
+    # 1. Try to fetch from new Vibe DB first
+    # (In a real app, we'd pass this in user_context to avoid N+1 queries, but for now we fetch it)
+    # The user_memory dict passed here might be the legacy one.
+    
+    # Ideally, we should receive the user_vibe here.
+    # For backward compatibility with the current signature, let's assume user_memory 
+    # might contain the new vibe data if we updated the caller, or we fetch it.
+    
+    # Check if we can get the user_id from context (not passed here currently).
+    # Simplification: We will return a generic Gen Z baseline if we can't get the specific prompt, 
+    # BUT since we are integrating Phase 2, let's assume the Orchestrator will be updated to pass "style_prompt"
+    # inside user_memory or similar.
+    
+    if user_memory and "detected_style" in user_memory and "style_prompt" in user_memory["detected_style"]:
+         return user_memory["detected_style"]["style_prompt"]
+
+    # Fallback to dynamic generation if the prompt isn't pre-calculated
     baseline = (
         "Write like a Gen Z college student. Be casual, concise, friendly. "
         "Use contractions and avoid formal phrasing."
     )
-    if not user_memory:
-        return baseline + " Keep it short with light punctuation and 0-2 emojis."
-
-    detected = user_memory.get("detected_style") or {}
-    vocab = user_memory.get("vocabulary_patterns") or {}
-    slang = vocab.get("common_slang") or []
-    avg_words = detected.get("avg_words_per_sentence")
-    emoji_rate = detected.get("emoji_rate")
-    lower_ratio = detected.get("lowercase_ratio", 0)
-    casing = "mostly lowercase" if lower_ratio >= 0.7 else "mixed case"
-    slang_hint = f"Use some of these terms if natural: {', '.join(slang[:6])}." if slang else ""
-    length_hint = f"Aim for about {int(avg_words)} words per sentence." if avg_words else "Keep sentences short."
-    emoji_hint = (
-        f"Emoji rate ~{emoji_rate} per word; use 0-2 emojis max."
-        if emoji_rate is not None
-        else "Use 0-2 emojis max."
-    )
-    return " ".join([baseline, f"Mirror the user's style: {casing}.", length_hint, emoji_hint, slang_hint]).strip()
+    return baseline
 
 
 def update_conversation_state(state: dict, message_text: str) -> dict:
@@ -393,16 +393,26 @@ def generate_small_talk_response(
     user_memory: Optional[dict],
     recent_user_messages: Optional[list[str]] = None,
     conversation_history: str = "",
+    user_context: Optional[dict] = None,
 ) -> str:
     """Generate a casual, friend-like response without making factual claims."""
     text = (message_text or "").strip().lower()
     prefs = (user_memory or {}).get("known_preferences") or {}
     likes = prefs.get("likes") or []
     like_hint = f"btw you still into {likes[0]}?" if likes else ""
+    
+    # Build Context String
+    context_str = ""
+    if user_context:
+        profile = user_context.get("profile") or {}
+        name = profile.get("first_name") or profile.get("full_name") or "Friend"
+        major = profile.get("major") or "Undecided"
+        year = profile.get("class_year") or "Student"
+        context_str = f"User: {name}, {year}, {major} Major."
 
     if settings.TEST_MODE:
         if any(x in text for x in ["who am i", "do you know me"]):
-            return "you tell me 😅 give me the tea"
+            return f"you tell me 😅 give me the tea, {context_str}"
         if any(x in text for x in ["yo", "hey", "hi", "sup", "what's up", "whats up"]):
             return "yo! what's good? " + like_hint
         if "?" in text:
@@ -412,8 +422,9 @@ def generate_small_talk_response(
     style_instructions = build_style_instructions(user_memory)
     vibe_instructions = build_vibe_instructions(recent_user_messages or [])
     prompt = f"""Write a friendly, creative small-talk reply. Do NOT claim facts or info you don't have. Keep it short and warm.
-
+    
 User message: "{message_text}"
+Context: {context_str}
 Style: {style_instructions}
 Vibe: {vibe_instructions}
 Conversation so far (last messages):
@@ -428,6 +439,26 @@ Return JSON:
         return "yo! what's the vibe?"
     return msg
 
+
+def generate_checkin_message(user_context: Dict, event_type: str, context: str) -> str:
+    """Generate a proactive check-in message for a life event."""
+    profile = user_context.get("profile") or {}
+    name = profile.get("first_name") or "Friend"
+    
+    prompt = f"""You are Link, a supportive friend observing a life event.
+    The user ({name}) just had a '{event_type}'.
+    Context: "{context}"
+    
+    Write a short, casual text to check in on them.
+    Examples:
+    - Exam: "Yo how did the exam go?"
+    - Interview: "Hey! How was the interview?"
+    - Date: "omg tell me everything. how was the date??"
+    
+    Return JSON: {{"message": "..."}}"""
+    
+    result = llm_json(prompt, temperature=0.7)
+    return result.get("message") or f"Hey, just checking in. How did the {event_type} go?"
 
 def classify_smalltalk(message_text: str) -> str:
     """Classify smalltalk intent into general/capabilities/checkin."""

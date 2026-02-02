@@ -109,7 +109,7 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
     if any(x in text for x in ["club", "clubs", "org", "organization", "organizations", "compsci", "computer science", "cs "]):
         return IntentResult(Intent.CLUB_SEARCH, entities, raw)
 
-    if any(x in text for x in ["event", "events", "party", "show", "concert", "talk"]):
+    if any(x in text for x in ["event", "events", "party", "show", "concert", "talk", "hackathon"]):
         return IntentResult(Intent.EVENT_SEARCH, entities, raw)
 
     if any(x in text for x in ["find", "anyone", "someone", "people", "person", "connect me", "looking for"]):
