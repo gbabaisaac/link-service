@@ -1176,14 +1176,19 @@ def get_classmates(user_id: str, semester: Optional[str] = None) -> list[str]:
 # ============ Phase 2: Memory & Social Intelligence ============
 
 # --- Encrpyted Memory ---
-def create_encrypted_memory(user_id: str, encrypted_value: str, category: str, source: str = "chat") -> dict:
+def create_encrypted_memory(user_id: str, encrypted_value: str, category: str = "facts", source: str = "chat", tier: str = "long", priority: int = 1, expires_at: Optional[str] = None) -> dict:
+    """Save an encrypted fact/preference to the Vault."""
     client = get_supabase_client()
-    return client.table("link_memory").insert({
+    payload = {
         "user_id": user_id,
         "encrypted_value": encrypted_value,
         "category": category,
-        "source": source
-    }).execute().data[0]
+        "source": source,
+        "tier": tier,
+        "priority": priority,
+        "expires_at": expires_at
+    }
+    return client.table("link_memory").insert(payload).execute().data[0]
 
 def list_encrypted_memories(user_id: str, category: Optional[str] = None) -> list[dict]:
     client = get_supabase_client()

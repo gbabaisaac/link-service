@@ -399,7 +399,17 @@ def generate_small_talk_response(
     text = (message_text or "").strip().lower()
     prefs = (user_memory or {}).get("known_preferences") or {}
     likes = prefs.get("likes") or []
-    like_hint = f"btw you still into {likes[0]}?" if likes else ""
+    # Decrypted Vault Facts (Structured)
+    vault_list = prefs.get("vault_facts") or []
+    long_facts = [f["content"] for f in vault_list if f.get("tier") == "long"]
+    med_facts = [f["content"] for f in vault_list if f.get("tier") == "medium"]
+    
+    vault_hint = ""
+    if long_facts:
+        vault_hint += f"Long-term Facts: {', '.join(long_facts)}. "
+    if med_facts:
+        # High emphasis on current situation
+        vault_hint += f"CURRENT SITUATION (High Priority): {', '.join(med_facts)}."
     
     # Build Context String
     context_str = ""
@@ -412,7 +422,7 @@ def generate_small_talk_response(
 
     if settings.TEST_MODE:
         if any(x in text for x in ["who am i", "do you know me"]):
-            return f"you tell me 😅 give me the tea, {context_str}"
+            return f"you tell me 😅 give me the tea, {context_str}. I recall: {vault_hint}"
         if any(x in text for x in ["yo", "hey", "hi", "sup", "what's up", "whats up"]):
             return "yo! what's good? " + like_hint
         if "?" in text:
@@ -425,6 +435,7 @@ def generate_small_talk_response(
     
 User message: "{message_text}"
 Context: {context_str}
+IMPORTANT CONTEXT (Memory): {vault_hint}
 Style: {style_instructions}
 Vibe: {vibe_instructions}
 Conversation so far (last messages):

@@ -54,7 +54,12 @@ class LinkInstance:
         from life_event_detector import life_event_detector
         detected_events = life_event_detector.process_message(self.user_id, message)
         
-        # 3. Get Persistent State (Runner Logic)
+        # 3. Update Personal Memory (The Vault)
+        # Extract new facts/interests from the message
+        from memory_manager import memory_manager
+        memory_manager.process_message(self.user_id, message)
+        
+        # 4. Get Persistent State (Runner Logic)
         state = db.get_or_create_link_conversation_state(self.user_id, conversation_id)
         current_mode = state.get("mode", "idle")
         active_task = state.get("active_task") or {}
@@ -76,7 +81,7 @@ class LinkInstance:
         if transition.mode == "agent":
             return self._handle_agent_mode(message, transition.active_task)
         elif transition.mode == "outreach":
-            return self._handle_outreach_mode(message, transition.active_task)
+            return self._handle_distributed_query(transition.active_task, message)
         elif transition.mode == "awaiting_consent":
             return self._handle_consent_mode(message, transition.active_task, intent_result)
         else:
@@ -149,7 +154,16 @@ class LinkInstance:
         recent_messages = [h.get("content") for h in history_rows if h.get("sender_type") == "user" and h.get("content")]
         formatted_history = "\n".join([f"{h['sender_type']}: {h['content']}" for h in reversed(history_rows)])
 
-        user_memory = db.get_user_memory(self.user_id)
+        # Fetch and Decrypt long-term memory (Multi-Tier)
+        from memory_manager import memory_manager
+        vault_facts = memory_manager.get_decrypted_facts(self.user_id)
+        
+        user_memory = db.get_user_memory(self.user_id) or {}
+        # Merge legacy memory with new multi-tier vault memory
+        if vault_facts:
+            user_memory.setdefault("known_preferences", {}).setdefault("vault_facts", [])
+            user_memory["known_preferences"]["vault_facts"] = vault_facts
+
         response = link_orchestrator.generate_small_talk_response(
             message,
             user_memory,
@@ -160,14 +174,33 @@ class LinkInstance:
         return {"response": response, "action": "chat"}
 
     def _handle_memory_query(self, intent_type: str) -> Dict[str, Any]:
-        """Access user's private encrypted memory."""
+        """Access user's private encrypted memory (Audit Feature)."""
         if intent_type == "profile_classes":
             classes = self.user_context.get("classes", [])
             names = [c.get("name") for c in classes] if classes else []
             if names:
                 return {"response": f"You are taking: {', '.join(names)}", "action": "memory_read"}
         
-        return {"response": "Checking your memory... (Encrypted memory coming in Phase 2)", "action": "memory_lookup"}
+        # Real Audit Feature from the Vault
+        from memory_manager import memory_manager
+        facts = memory_manager.get_decrypted_facts(self.user_id)
+        
+        if intent_type == "profile_question":
+            # Combine static profile info with dynamic vault facts
+            profile = self.user_context.get("profile") or {}
+            major = profile.get("major", "Psychology")
+            name = profile.get("first_name", "Isaac")
+            static_interests = ", ".join(profile.get("interests", ["Drawing", "Painting", "Parties"]))
+            
+            # Format facts by tier
+            long_facts = [f["content"] for f in facts if f["tier"] == "long"]
+            med_facts = [f["content"] for f in facts if f["tier"] == "medium"]
+            
+            vault_str = f"Long-term: {', '.join(long_facts) if long_facts else 'none'}. Medium-term/Current: {', '.join(med_facts) if med_facts else 'none'}."
+            response = f"you're {name}, {major} major, into {static_interests}. {vault_str} want me to update anything?"
+            return {"response": response, "action": "memory_read"}
+
+        return {"response": "Checking your memory...", "action": "memory_lookup"}
 
     def handle_incoming_request(self, origin_link_id: str, request_type: str, payload: Dict) -> Dict[str, Any]:
         """Handle cross-link request from another instance."""
