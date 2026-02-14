@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import supabase_client as db
 
 
-PROBING_RE = re.compile(r"\\bwhere\\s+is\\b|\\bwhere's\\b", re.IGNORECASE)
+PROBING_RE = re.compile(r"\bwhere\s+is\b|\bwhere's\b", re.IGNORECASE)
 MAX_PROBES_PER_HOUR = 3
 
 

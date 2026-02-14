@@ -2,10 +2,10 @@ import re
 from typing import Dict, Any, Optional
 
 
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", re.IGNORECASE)
-PHONE_RE = re.compile(r"(\\+?\\d{1,3}[\\s-]?)?(\\(?\\d{3}\\)?[\\s-]?)\\d{3}[\\s-]?\\d{4}")
-HANDLE_RE = re.compile(r"@\\w+")
-URL_RE = re.compile(r"https?://\\S+")
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+PHONE_RE = re.compile(r"(\+?\d{1,3}[\s-]?)?(\(?\d{3}\)?[\s-]?)\d{3}[\s-]?\d{4}")
+HANDLE_RE = re.compile(r"@\w+")
+URL_RE = re.compile(r"https?://\S+")
 
 
 def _redact_pii(text: str) -> str:

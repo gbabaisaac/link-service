@@ -2,9 +2,9 @@ import logging
 import re
 
 
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", re.IGNORECASE)
-PHONE_RE = re.compile(r"(\\+?\\d{1,3}[\\s-]?)?(\\(?\\d{3}\\)?[\\s-]?)\\d{3}[\\s-]?\\d{4}")
-HANDLE_RE = re.compile(r"@\\w+")
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+PHONE_RE = re.compile(r"(\+?\d{1,3}[\s-]?)?(\(?\d{3}\)?[\s-]?)\d{3}[\s-]?\d{4}")
+HANDLE_RE = re.compile(r"@\w+")
 
 
 class PiiRedactionFilter(logging.Filter):
