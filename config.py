@@ -32,6 +32,8 @@ class Settings:
     OUTREACH_CONFIDENCE_THRESHOLD: float = float(os.getenv("LINK_OUTREACH_CONFIDENCE_THRESHOLD", "0.75"))
     REINDEX_ON_START: bool = os.getenv("LINK_REINDEX_ON_START", "false").lower() == "true"
     TEST_MODE: bool = os.getenv("TEST_MODE", "false").lower() == "true"
+    USE_WORK_ORDERS: bool = os.getenv("LINK_USE_WORK_ORDERS", "true").lower() == "true"
+    RUNNER_JWT: str = os.getenv("LINK_RUNNER_JWT", "")
 
     # Admin
     ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")

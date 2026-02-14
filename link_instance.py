@@ -42,6 +42,13 @@ class LinkInstance:
         Main entry point for processing a user message.
         """
         self.conversation_id = conversation_id
+
+        from probing_detector import should_rate_limit
+        if should_rate_limit(self.user_id, message):
+            return {
+                "response": "I can't help with that. Try asking in a more general way.",
+                "action": "rate_limited",
+            }
         
         # 1. Update Vibe/Style Memory
         # Use VibeMatcher to analyze and persist user style
@@ -122,8 +129,20 @@ class LinkInstance:
         # For MVP, we simulate a lookup or fail.
         # target_user = db.lookup_user_by_name(target_name, self.university_id) ...
         
-        # Placeholder response for now as we don't have name->uuid in simple mock
-        return {"response": f"I can try to connect you with {target_name}. Shall I send a request?", "action": "confirm_outreach"}
+        from vault_service import create_work_order
+
+        work_order = create_work_order(
+            requester_user_id=self.user_id,
+            conversation_id=self.conversation_id,
+            message=message,
+            intent="person_search",
+            user_context=self.user_context,
+        )
+        return {
+            "response": f"I'll ask around for {target_name}.",
+            "action": "work_order_created",
+            "work_order_id": work_order["id"],
+        }
 
     def _handle_consent_mode(self, message: str, task: Dict, intent_result: Any) -> Dict[str, Any]:
         """Handle Consent Responses (Yes/No to sharing data)."""

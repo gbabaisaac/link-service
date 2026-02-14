@@ -36,6 +36,17 @@ from schemas import (
     LinkRelayResponse,
     LinkReminderRequest,
     LinkReminderResponse,
+    LinkWorkOrderStartRequest,
+    LinkWorkOrderStartResponse,
+    LinkWorkOrderCollectRequest,
+    LinkWorkOrderCollectResponse,
+    LinkWorkOrderReplyRequest,
+    LinkWorkOrderReplyResponse,
+    PrivacyPermissionsRequest,
+    PrivacyPermissionsResponse,
+    PrivacyRevokeRequest,
+    PrivacyClearVaultRequest,
+    PrivacyClearVaultResponse,
 )
 import link_logic
 import link_orchestrator
@@ -44,6 +55,8 @@ import rag_index
 import supabase_client as db
 from intent_classifier import classify_intent, Intent
 from state_machine import determine_transition
+from vault_service import create_work_order
+from logging_config import configure_logging
 
 app = FastAPI(
     title="Link AI",
@@ -208,6 +221,7 @@ def replay_last_db_response(
 @app.on_event("startup")
 async def startup_tasks():
     """Optional startup tasks."""
+    configure_logging()
     if settings.REINDEX_ON_START:
         try:
             rag_index.build_index()
@@ -267,29 +281,53 @@ async def query(request: QueryRequest):
         )
         if result.get("need_outreach") and not result.get("outreach_request_id"):
             intent = result.get("intent")
-            outreach_payload = {
-                "university_id": request.university_id,
-                "requesting_user_id": request.user_id,
-                "original_question": request.question,
-                "parsed_intent": intent.dict() if intent else {},
-                "search_category": (intent.type if intent else "unknown"),
-                "search_criteria": {"entities": (intent.entities if intent else [])},
-                "status": "pending",
-                "batch_size": settings.OUTREACH_BATCH_SIZE,
-                "max_attempts": settings.MAX_OUTREACH_BATCHES,
-                "time_per_round_minutes": settings.OUTREACH_WAIT_MINUTES,
-                "target_confidence_threshold": settings.OUTREACH_CONFIDENCE_THRESHOLD,
-                "hard_cap": settings.OUTREACH_HARD_CAP,
-                "excluded_user_ids": [request.user_id],
-            }
-            outreach = outreach_logic.start_outreach(outreach_payload)
-            result["outreach_request_id"] = outreach["request"]["id"]
-            result["data"] = {
-                "need_outreach": True,
-                "outreach_request_id": outreach["request"]["id"],
-                "status": "collecting",
-                "message": "I'm not confident yet. I can ask a few relevant students.",
-            }
+            if settings.USE_WORK_ORDERS:
+                user_context = db.get_user_context(request.user_id)
+                work_order = create_work_order(
+                    requester_user_id=request.user_id,
+                    conversation_id=None,
+                    message=request.question,
+                    intent=(intent.type if intent else "unknown"),
+                    user_context=user_context or {},
+                )
+                if work_order.get("error"):
+                    result["data"] = {
+                        "need_outreach": False,
+                        "error": work_order.get("error"),
+                        "message": work_order.get("message"),
+                    }
+                    return QueryResponse(**result)
+                result["outreach_request_id"] = work_order["id"]
+                result["data"] = {
+                    "need_outreach": True,
+                    "work_order_id": work_order["id"],
+                    "status": "pending",
+                    "message": "I'm not confident yet. I can ask a few relevant students.",
+                }
+            else:
+                outreach_payload = {
+                    "university_id": request.university_id,
+                    "requesting_user_id": request.user_id,
+                    "original_question": request.question,
+                    "parsed_intent": intent.dict() if intent else {},
+                    "search_category": (intent.type if intent else "unknown"),
+                    "search_criteria": {"entities": (intent.entities if intent else [])},
+                    "status": "pending",
+                    "batch_size": settings.OUTREACH_BATCH_SIZE,
+                    "max_attempts": settings.MAX_OUTREACH_BATCHES,
+                    "time_per_round_minutes": settings.OUTREACH_WAIT_MINUTES,
+                    "target_confidence_threshold": settings.OUTREACH_CONFIDENCE_THRESHOLD,
+                    "hard_cap": settings.OUTREACH_HARD_CAP,
+                    "excluded_user_ids": [request.user_id],
+                }
+                outreach = outreach_logic.start_outreach(outreach_payload)
+                result["outreach_request_id"] = outreach["request"]["id"]
+                result["data"] = {
+                    "need_outreach": True,
+                    "outreach_request_id": outreach["request"]["id"],
+                    "status": "collecting",
+                    "message": "I'm not confident yet. I can ask a few relevant students.",
+                }
         return QueryResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1042,19 +1080,57 @@ async def link_agent(request: LinkAgentRequest):
                     task=None,
                     ui=build_ui_hints("conversation", None),
                 )
-            outreach = link_orchestrator.start_outreach(
-                request.user_id,
-                request.university_id,
-                convo["id"],
-                request.message_text,
-                intent,
-                session_id=session["id"] if session else None,
-                access_token=request.access_token,
-            )
-            if active_task:
-                active_task = dict(active_task)
-                active_task["status"] = "outreach_sent"
-                active_task["run_id"] = outreach.get("run_id")
+            if settings.USE_WORK_ORDERS:
+                work_order = create_work_order(
+                    requester_user_id=request.user_id,
+                    conversation_id=convo["id"],
+                    message=request.message_text,
+                    intent="person_search",
+                    user_context=user_context or {},
+                )
+                if work_order.get("error"):
+                    reply = work_order.get("message") or "I can't help with that request."
+                    link_orchestrator.insert_link_response(
+                        convo["id"],
+                        request.university_id,
+                        reply,
+                        citations=[],
+                        cards={},
+                        confidence=0.2,
+                        session_id=session["id"] if session else None,
+                    )
+                    return LinkAgentResponse(
+                        mode="answered",
+                        confidence=0.2,
+                        answer_text=reply,
+                        citations=[],
+                        task=None,
+                        ui=build_ui_hints("conversation", None),
+                    )
+                if active_task:
+                    active_task = dict(active_task)
+                else:
+                    active_task = {"type": "work_order"}
+                active_task["status"] = "pending"
+                active_task["run_id"] = work_order.get("id")
+                response_mode = "outreach_started"
+                response_run_id = work_order.get("id")
+            else:
+                outreach = link_orchestrator.start_outreach(
+                    request.user_id,
+                    request.university_id,
+                    convo["id"],
+                    request.message_text,
+                    intent,
+                    session_id=session["id"] if session else None,
+                    access_token=request.access_token,
+                )
+                if active_task:
+                    active_task = dict(active_task)
+                    active_task["status"] = "outreach_sent"
+                    active_task["run_id"] = outreach.get("run_id")
+                response_mode = "outreach_started"
+                response_run_id = outreach.get("run_id")
             db.update_link_conversation_state(
                 convo_state["id"],
                 {
@@ -1064,9 +1140,9 @@ async def link_agent(request: LinkAgentRequest):
                 },
             )
             return LinkAgentResponse(
-                mode="outreach_started",
+                mode=response_mode,
                 confidence=0.4,
-                run_id=outreach["run_id"],
+                run_id=response_run_id,
                 task=build_task_state(active_task),
                 ui=build_ui_hints("outreach", active_task),
             )
@@ -1315,19 +1391,55 @@ async def link_agent(request: LinkAgentRequest):
                 ui=build_ui_hints("conversation", None),
             )
 
-        outreach = link_orchestrator.start_outreach(
-            request.user_id,
-            request.university_id,
-            convo["id"],
-            request.message_text,
-            intent,
-            session_id=session["id"] if session else None,
-            access_token=request.access_token,
-        )
-        if active_task:
-            active_task = dict(active_task)
-            active_task["status"] = "outreach_sent"
-            active_task["run_id"] = outreach.get("run_id")
+        if settings.USE_WORK_ORDERS:
+            work_order = create_work_order(
+                requester_user_id=request.user_id,
+                conversation_id=convo["id"],
+                message=request.message_text,
+                intent="person_search",
+                user_context=user_context or {},
+            )
+            if work_order.get("error"):
+                reply = work_order.get("message") or "I can't help with that request."
+                link_orchestrator.insert_link_response(
+                    convo["id"],
+                    request.university_id,
+                    reply,
+                    citations=[],
+                    cards={},
+                    confidence=0.2,
+                    session_id=session["id"] if session else None,
+                )
+                return LinkAgentResponse(
+                    mode="answered",
+                    confidence=0.2,
+                    answer_text=reply,
+                    citations=[],
+                    task=None,
+                    ui=build_ui_hints("conversation", None),
+                )
+            if active_task:
+                active_task = dict(active_task)
+            else:
+                active_task = {"type": "work_order"}
+            active_task["status"] = "pending"
+            active_task["run_id"] = work_order.get("id")
+            response_run_id = work_order.get("id")
+        else:
+            outreach = link_orchestrator.start_outreach(
+                request.user_id,
+                request.university_id,
+                convo["id"],
+                request.message_text,
+                intent,
+                session_id=session["id"] if session else None,
+                access_token=request.access_token,
+            )
+            if active_task:
+                active_task = dict(active_task)
+                active_task["status"] = "outreach_sent"
+                active_task["run_id"] = outreach.get("run_id")
+            response_run_id = outreach.get("run_id")
         db.update_link_conversation_state(
             convo_state["id"],
             {
@@ -1339,7 +1451,7 @@ async def link_agent(request: LinkAgentRequest):
         return LinkAgentResponse(
             mode="outreach_started",
             confidence=confidence,
-            run_id=outreach["run_id"],
+            run_id=response_run_id,
             task=build_task_state(active_task),
             ui=build_ui_hints("outreach", active_task),
         )
@@ -1363,6 +1475,110 @@ async def link_outreach_collect(request: LinkOutreachCollectRequest):
             status=result.get("status"),
             confidence=result.get("confidence"),
             message=result.get("message"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/work_orders/start", response_model=LinkWorkOrderStartResponse)
+async def link_work_order_start(request: LinkWorkOrderStartRequest):
+    """Create a sanitized work order for the public runner."""
+    try:
+        validate_uuid(request.user_id, "user_id")
+        user_context = None
+        if request.access_token:
+            user_context = db.get_user_context_rls(request.access_token, request.user_id)
+        if not user_context:
+            user_context = db.get_user_context(request.user_id)
+        work_order = create_work_order(
+            requester_user_id=request.user_id,
+            conversation_id=request.conversation_id,
+            message=request.message_text,
+            intent=request.intent,
+            user_context=user_context or {},
+        )
+        if work_order.get("error"):
+            raise HTTPException(status_code=400, detail=work_order.get("message"))
+        return LinkWorkOrderStartResponse(work_order_id=work_order["id"], status=work_order.get("status", "pending"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/work_orders/collect", response_model=LinkWorkOrderCollectResponse)
+async def link_work_order_collect(request: LinkWorkOrderCollectRequest):
+    """Collect work order results for a requester."""
+    try:
+        validate_uuid(request.work_order_id, "work_order_id")
+        validate_uuid(request.requester_user_id, "requester_user_id")
+        mapping = db.get_work_order_map(request.work_order_id)
+        if not mapping or mapping.get("requester_user_id") != request.requester_user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to view this work order")
+        results = db.list_work_order_results(request.work_order_id)
+        return LinkWorkOrderCollectResponse(status="ok", results=results or [])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/link/work_orders/reply", response_model=LinkWorkOrderReplyResponse)
+async def link_work_order_reply(request: LinkWorkOrderReplyRequest):
+    """Handle a target user's reply to an anonymous work order."""
+    try:
+        validate_uuid(request.work_order_id, "work_order_id")
+        validate_uuid(request.responder_user_id, "responder_user_id")
+        result = db.get_work_order_result(request.work_order_id, request.responder_user_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Work order result not found")
+        response = (request.response_text or "").lower().strip()
+        if any(x in response for x in ["yes", "yeah", "sure", "i can", "ok"]):
+            status = "accepted"
+        elif any(x in response for x in ["no", "can't", "cant", "sorry"]):
+            status = "declined"
+        else:
+            status = result.get("status") or "notified"
+        db.update_work_order_result_status(result["id"], status)
+        return LinkWorkOrderReplyResponse(status=status)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/privacy/permissions", response_model=PrivacyPermissionsResponse)
+async def privacy_permissions(request: PrivacyPermissionsRequest):
+    """List user sharing rules."""
+    try:
+        validate_uuid(request.user_id, "user_id")
+        rules = db.list_link_sharing_rules_rows(request.user_id)
+        return PrivacyPermissionsResponse(rules=rules or [])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/privacy/revoke", response_model=PrivacyPermissionsResponse)
+async def privacy_revoke(request: PrivacyRevokeRequest):
+    """Revoke a sharing rule by ID."""
+    try:
+        validate_uuid(request.user_id, "user_id")
+        validate_uuid(request.rule_id, "rule_id")
+        db.revoke_link_sharing_rule(request.rule_id)
+        rules = db.list_link_sharing_rules_rows(request.user_id)
+        return PrivacyPermissionsResponse(rules=rules or [])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/privacy/clear_vault", response_model=PrivacyClearVaultResponse)
+async def privacy_clear_vault(request: PrivacyClearVaultRequest):
+    """Clear user's encrypted memory and related personal data."""
+    try:
+        validate_uuid(request.user_id, "user_id")
+        result = db.clear_user_vault(request.user_id)
+        return PrivacyClearVaultResponse(
+            deleted_memories=result.get("deleted_memories", 0),
+            deleted_events=result.get("deleted_events", 0),
+            deleted_vibe=result.get("deleted_vibe", False),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

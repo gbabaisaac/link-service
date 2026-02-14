@@ -62,17 +62,16 @@ class LifeEventDetector:
         # MVP Rule: Check in 4 hours after the target time
         run_at = target_date + timedelta(hours=4)
         
-        job_payload = {
-            "user_id": user_id,
-            "run_at": run_at.isoformat(),
-            "job_type": "check_in",
-            "payload": {
+        from link_scheduler import schedule_checkin
+        schedule_checkin(
+            user_id,
+            run_at,
+            {
                 "event_id": saved_event["id"],
                 "event_type": event_type,
-                "context": original_text
-            }
-        }
-        db.create_scheduled_job(job_payload)
+                "context": original_text,
+            },
+        )
         
         return saved_event
 

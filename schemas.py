@@ -137,6 +137,62 @@ class LinkReminderRequest(BaseModel):
 class LinkReminderResponse(BaseModel):
     reminder_id: str
 
+
+class LinkWorkOrderStartRequest(BaseModel):
+    user_id: str
+    conversation_id: Optional[str] = None
+    message_text: str
+    intent: str
+    access_token: Optional[str] = None
+
+
+class LinkWorkOrderStartResponse(BaseModel):
+    work_order_id: str
+    status: str
+
+
+class LinkWorkOrderCollectRequest(BaseModel):
+    work_order_id: str
+    requester_user_id: str
+
+
+class LinkWorkOrderCollectResponse(BaseModel):
+    status: str
+    results: list[dict] = []
+
+
+class LinkWorkOrderReplyRequest(BaseModel):
+    work_order_id: str
+    responder_user_id: str
+    response_text: str
+
+
+class LinkWorkOrderReplyResponse(BaseModel):
+    status: str
+
+
+class PrivacyPermissionsRequest(BaseModel):
+    user_id: str
+
+
+class PrivacyPermissionsResponse(BaseModel):
+    rules: list[dict] = []
+
+
+class PrivacyRevokeRequest(BaseModel):
+    user_id: str
+    rule_id: str
+
+
+class PrivacyClearVaultRequest(BaseModel):
+    user_id: str
+
+
+class PrivacyClearVaultResponse(BaseModel):
+    deleted_memories: int
+    deleted_events: int
+    deleted_vibe: bool
+
 # ============ Response Models ============
 
 class Intent(BaseModel):

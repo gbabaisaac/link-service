@@ -7,6 +7,7 @@ from config import settings
 
 _client: Optional[Client] = None
 _rls_clients: dict[str, Client] = {}
+_runner_client: Optional[Client] = None
 
 
 def get_supabase_client() -> Client:
@@ -34,6 +35,20 @@ def get_supabase_client_for_user(access_token: str) -> Client:
     return client
 
 
+def get_supabase_client_for_runner() -> Client:
+    """Create a Supabase client that enforces RLS for the runner service."""
+    global _runner_client
+    if _runner_client is not None:
+        return _runner_client
+    if not settings.SUPABASE_URL or not settings.SUPABASE_ANON_KEY:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_ANON_KEY must be set for runner client")
+    if not settings.RUNNER_JWT:
+        raise RuntimeError("LINK_RUNNER_JWT must be set for runner client")
+    options = ClientOptions(headers={"Authorization": f"Bearer {settings.RUNNER_JWT}"})
+    _runner_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY, options=options)
+    return _runner_client
+
+
 # ============ Profile Functions ============
 
 def get_profiles(university_id: Optional[str] = None, limit: int = 500) -> list[dict]:
@@ -43,6 +58,21 @@ def get_profiles(university_id: Optional[str] = None, limit: int = 500) -> list[
     if university_id:
         query = query.eq("university_id", university_id)
     # Only include visible, non-Link profiles
+    query = (
+        query
+        .neq("is_link", True)
+        .in_("friends_visibility", ["school", "public"])
+        .eq("yearbook_visible", True)
+    )
+    return query.limit(limit).execute().data
+
+
+def get_profiles_runner(university_id: Optional[str] = None, limit: int = 500) -> list[dict]:
+    """Fetch public profiles using runner RLS client."""
+    client = get_supabase_client_for_runner()
+    query = client.table("profiles").select("*")
+    if university_id:
+        query = query.eq("university_id", university_id)
     query = (
         query
         .neq("is_link", True)
@@ -195,6 +225,19 @@ def get_link_system_profile(university_id: str) -> Optional[dict]:
     if result.data:
         return result.data
     return None
+
+
+def get_link_system_profile_runner(university_id: str) -> Optional[dict]:
+    """Fetch Link system profile using runner RLS client."""
+    client = get_supabase_client_for_runner()
+    result = (
+        client.table("link_system_profile")
+        .select("*")
+        .eq("university_id", university_id)
+        .maybe_single()
+        .execute()
+    )
+    return result.data if result.data else None
 
 
 # ============ Organization Functions ============
@@ -1197,6 +1240,17 @@ def list_encrypted_memories(user_id: str, category: Optional[str] = None) -> lis
         query = query.eq("category", category)
     return query.execute().data
 
+def list_encrypted_memories_runner(user_id: str, category: Optional[str] = None) -> list[dict]:
+    """Runner client: Should be blocked by RLS in production."""
+    client = get_supabase_client_for_runner()
+    query = client.table("link_memory").select("*").eq("user_id", user_id)
+    if category:
+        query = query.eq("category", category)
+    result = query.execute()
+    if getattr(result, "error", None):
+        return []
+    return result.data
+
 # --- User Vibe ---
 def get_user_vibe(user_id: str) -> Optional[dict]:
     client = get_supabase_client()
@@ -1249,6 +1303,147 @@ def list_pending_jobs(limit: int = 50) -> list[dict]:
 def update_job_status(job_id: str, status: str) -> dict:
     client = get_supabase_client()
     return client.table("link_scheduled_jobs").update({"status": status}).eq("id", job_id).execute().data[0]
+
+# ============ Brain B Work Orders ============
+
+def create_work_order(payload: dict) -> dict:
+    client = get_supabase_client()
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return client.table("link_work_orders").insert(payload).execute().data[0]
+
+
+def list_pending_work_orders(limit: int = 25) -> list[dict]:
+    client = get_supabase_client()
+    return (
+        client.table("link_work_orders")
+        .select("*")
+        .eq("status", "pending")
+        .order("created_at")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+def update_work_order_status(work_order_id: str, status: str) -> dict:
+    client = get_supabase_client()
+    payload = {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}
+    return client.table("link_work_orders").update(payload).eq("id", work_order_id).execute().data[0]
+
+
+def create_work_order_result(payload: dict) -> dict:
+    client = get_supabase_client()
+    return client.table("link_work_order_results").insert(payload).execute().data[0]
+
+
+def update_work_order_result_status(result_id: str, status: str) -> dict:
+    client = get_supabase_client()
+    return client.table("link_work_order_results").update({"status": status}).eq("id", result_id).execute().data[0]
+
+
+def list_work_order_results(work_order_id: str) -> list[dict]:
+    client = get_supabase_client()
+    return (
+        client.table("link_work_order_results")
+        .select("*")
+        .eq("work_order_id", work_order_id)
+        .execute()
+        .data
+    )
+
+
+def get_work_order_result(work_order_id: str, target_user_id: str) -> Optional[dict]:
+    client = get_supabase_client()
+    result = (
+        client.table("link_work_order_results")
+        .select("*")
+        .eq("work_order_id", work_order_id)
+        .eq("target_user_id", target_user_id)
+        .maybe_single()
+        .execute()
+    )
+    return result.data if result.data else None
+
+
+def create_work_order_map(payload: dict) -> dict:
+    client = get_supabase_client()
+    return client.table("link_work_order_map").insert(payload).execute().data[0]
+
+
+def get_work_order_map(work_order_id: str) -> Optional[dict]:
+    client = get_supabase_client()
+    result = (
+        client.table("link_work_order_map")
+        .select("*")
+        .eq("work_order_id", work_order_id)
+        .maybe_single()
+        .execute()
+    )
+    return result.data if result.data else None
+
+
+def list_pending_work_orders_runner(limit: int = 25) -> list[dict]:
+    client = get_supabase_client_for_runner()
+    return (
+        client.table("link_work_orders")
+        .select("*")
+        .eq("status", "pending")
+        .order("created_at")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+def update_work_order_status_runner(work_order_id: str, status: str) -> dict:
+    client = get_supabase_client_for_runner()
+    payload = {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}
+    return client.table("link_work_orders").update(payload).eq("id", work_order_id).execute().data[0]
+
+
+def create_work_order_result_runner(payload: dict) -> dict:
+    client = get_supabase_client_for_runner()
+    return client.table("link_work_order_results").insert(payload).execute().data[0]
+
+
+def update_work_order_result_status_runner(result_id: str, status: str) -> dict:
+    client = get_supabase_client_for_runner()
+    return client.table("link_work_order_results").update({"status": status}).eq("id", result_id).execute().data[0]
+
+
+def list_work_order_results_runner(work_order_id: str) -> list[dict]:
+    client = get_supabase_client_for_runner()
+    return (
+        client.table("link_work_order_results")
+        .select("*")
+        .eq("work_order_id", work_order_id)
+        .execute()
+        .data
+    )
+
+# ============ Probing Detector ============
+
+def create_probe_event(user_id: str, query_text: str, reason: str) -> dict:
+    client = get_supabase_client()
+    payload = {
+        "user_id": user_id,
+        "query_text": query_text,
+        "reason": reason,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    return client.table("link_probe_events").insert(payload).execute().data[0]
+
+
+def count_probe_events(user_id: str, since: datetime) -> int:
+    client = get_supabase_client()
+    result = (
+        client.table("link_probe_events")
+        .select("id", count="exact")
+        .eq("user_id", user_id)
+        .gte("created_at", since.isoformat())
+        .execute()
+    )
+    return int(result.count or 0)
 
 # ============ Phase 3: Link-to-Link (The Handshake) ============
 
@@ -1308,3 +1503,101 @@ def update_knowledge_target(target_id: str, payload: dict) -> dict:
     """Update target status (e.g. from pending -> approved)."""
     client = get_supabase_client()
     return client.table("link_knowledge_targets").update(payload).eq("id", target_id).execute().data[0]
+
+# ============ Runner RLS Restricted Messaging ============
+
+def get_or_create_dm_conversation_runner(user_id: str, target_user_id: str) -> Optional[dict]:
+    """Runner client: Get/Create DM conversation. RLS enforces participant check."""
+    client = get_supabase_client_for_runner()
+    # 1. Search for existing DM
+    result = (
+        client.table("conversations")
+        .select("id")
+        .eq("type", "direct")
+        .execute()
+    )
+    for convo in result.data:
+        participants = (
+            client.table("conversation_participants")
+            .select("user_id")
+            .eq("conversation_id", convo["id"])
+            .execute()
+            .data
+        )
+        uids = [p["user_id"] for p in participants]
+        if user_id in uids and target_user_id in uids:
+            return convo
+
+    # 2. Create if not found
+    new_convo = client.table("conversations").insert({
+        "type": "direct",
+        "created_by": user_id,
+        "is_system_generated": True,
+    }).execute().data[0]
+    client.table("conversation_participants").insert(
+        {"conversation_id": new_convo["id"], "user_id": user_id}
+    ).execute()
+    client.table("conversation_participants").insert(
+        {"conversation_id": new_convo["id"], "user_id": target_user_id}
+    ).execute()
+    return new_convo
+
+def insert_message_runner(conversation_id: str, sender_id: str, content: str, metadata: dict = None) -> dict:
+    """Runner client: Insert message. RLS enforces sender identity (must be Link)."""
+    client = get_supabase_client_for_runner()
+    payload = {
+        "conversation_id": conversation_id,
+        "sender_id": sender_id,
+        "content": content,
+        "metadata": metadata or {},
+    }
+    return client.table("messages").insert(payload).execute().data[0]
+
+def list_link_messages_runner(conversation_id: str, limit: int = 50) -> list[dict]:
+    """Runner client: List messages. RLS enforces conversation access."""
+    client = get_supabase_client_for_runner()
+    return (
+        client.table("messages")
+        .select("*")
+        .eq("conversation_id", conversation_id)
+        .order("created_at", descending=True)
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+def count_recent_work_orders(user_id: str, since: datetime) -> int:
+    """Vault client: Count work orders created by a user since a given time."""
+    client = get_supabase_client()
+    result = (
+        client.table("link_work_order_map")
+        .select("work_order_id", count="exact")
+        .eq("requester_user_id", user_id)
+        .gte("created_at", since.isoformat())
+        .execute()
+    )
+    return int(result.count or 0)
+
+# ============ Privacy Utilities ============
+
+def list_link_sharing_rules_rows(user_id: str) -> list[dict]:
+    client = get_supabase_client()
+    return client.table("link_sharing_rules").select("*").eq("user_id", user_id).execute().data
+
+
+def revoke_link_sharing_rule(rule_id: str) -> bool:
+    client = get_supabase_client()
+    res = client.table("link_sharing_rules").delete().eq("id", rule_id).execute()
+    return bool(res.data)
+
+
+def clear_user_vault(user_id: str) -> dict:
+    client = get_supabase_client()
+    memories = client.table("link_memory").delete().eq("user_id", user_id).execute()
+    events = client.table("link_life_events").delete().eq("user_id", user_id).execute()
+    vibe = client.table("link_user_vibe").delete().eq("user_id", user_id).execute()
+    return {
+        "deleted_memories": len(memories.data or []),
+        "deleted_events": len(events.data or []),
+        "deleted_vibe": bool(vibe.data),
+    }

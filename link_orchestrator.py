@@ -2127,6 +2127,7 @@ def resolve_consent(
 
     # If target declines, let requester know and keep searching.
     if not target_ok:
+        from social_buffer import polite_decline
         db.update_link_outreach_run(
             run_id,
             {
@@ -2144,7 +2145,7 @@ def resolve_consent(
             db.insert_link_message(
                 convo_id,
                 link_sender_id,
-                "They weren't available, but I'll keep looking.",
+                polite_decline(),
                 {"shareType": "text", "run_id": run_id},
             )
         try:

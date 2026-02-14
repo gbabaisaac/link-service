@@ -43,6 +43,15 @@ class LinkMemoryVault:
         decryptor = cipher.decryptor()
         return (decryptor.update(ciphertext) + decryptor.finalize()).decode()
 
+    def rotate_key(self, user_id: str) -> str:
+        """
+        Simulate key rotation. 
+        In prod, this would update a per-user secret in KMS.
+        """
+        new_key_b64 = base64.urlsafe_b64encode(os.urandom(32)).decode()
+        self.key = base64.urlsafe_b64decode(new_key_b64)
+        return new_key_b64
+
 # Singleton instance
 try:
     vault = LinkMemoryVault()
