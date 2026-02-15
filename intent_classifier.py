@@ -32,6 +32,7 @@ class Intent(str, Enum):
     MARKETPLACE = "marketplace"
     CONSENT_RESPONSE = "consent_response"
     CANCEL_TASK = "cancel_task"
+    REMINDER = "reminder"
     UNKNOWN = "unknown"
 
 
@@ -139,6 +140,9 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
         return IntentResult(Intent.SOCIAL, entities, raw)
     if any(x in text for x in ["buy", "sell", "market", "textbook", "bike", "sublet"]):
         return IntentResult(Intent.MARKETPLACE, entities, raw)
+
+    if any(x in text for x in ["remind me", "set a reminder", "reminder for", "remind me to", "don't let me forget", "alert me"]):
+        return IntentResult(Intent.REMINDER, entities, raw)
 
     # If user is responding while an active task exists, treat as followup.
     if active_task:

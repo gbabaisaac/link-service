@@ -4,7 +4,7 @@ from fastapi import FastAPI, Header, HTTPException
 import re
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from uuid import UUID
 
 from config import settings
@@ -54,6 +54,7 @@ import outreach_logic
 import rag_index
 import supabase_client as db
 from intent_classifier import classify_intent, Intent
+import re as regex_module
 from state_machine import determine_transition
 from vault_service import create_work_order
 from logging_config import configure_logging
@@ -216,6 +217,61 @@ def replay_last_db_response(
         task=None,
         ui=build_ui_hints("conversation", None),
     )
+
+
+def parse_reminder_time(text: str) -> Optional[datetime]:
+    """Parse time expressions like 'in 2 hours', 'in 30 minutes', 'tomorrow at 3pm'."""
+    text = text.lower()
+    now = datetime.now(timezone.utc)
+
+    # Match "in X hours/minutes"
+    match = regex_module.search(r"in\s+(\d+)\s*(hour|hr|minute|min)s?", text)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if "hour" in unit or "hr" in unit:
+            return now + timedelta(hours=amount)
+        else:
+            return now + timedelta(minutes=amount)
+
+    # Match "tomorrow"
+    if "tomorrow" in text:
+        tomorrow = now + timedelta(days=1)
+        # Check for time like "at 3pm" or "at 15:00"
+        time_match = regex_module.search(r"at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", text)
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2) or 0)
+            period = time_match.group(3)
+            if period == "pm" and hour < 12:
+                hour += 12
+            elif period == "am" and hour == 12:
+                hour = 0
+            return tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return tomorrow.replace(hour=9, minute=0, second=0, microsecond=0)  # Default 9am
+
+    # Match "in a bit" / "later" - default 1 hour
+    if any(x in text for x in ["in a bit", "later", "soon"]):
+        return now + timedelta(hours=1)
+
+    # Default to 1 hour if no time found
+    return now + timedelta(hours=1)
+
+
+def extract_reminder_task(text: str) -> str:
+    """Extract what the user wants to be reminded about."""
+    text = text.lower()
+    # Remove common prefixes
+    for prefix in ["remind me to", "remind me about", "remind me", "set a reminder to", "set a reminder for", "don't let me forget to", "alert me to"]:
+        if prefix in text:
+            text = text.split(prefix, 1)[1]
+            break
+    # Remove time expressions
+    text = regex_module.sub(r"in\s+\d+\s*(hour|hr|minute|min)s?", "", text)
+    text = regex_module.sub(r"tomorrow(\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm)?)?", "", text)
+    text = regex_module.sub(r"at\s+\d{1,2}(:\d{2})?\s*(am|pm)?", "", text)
+    text = regex_module.sub(r"in a bit|later|soon", "", text)
+    return text.strip() or "your reminder"
 
 
 @app.on_event("startup")
@@ -576,6 +632,46 @@ async def link_agent(request: LinkAgentRequest):
             return LinkAgentResponse(
                 mode="answered",
                 confidence=0.8,
+                answer_text=reply,
+                citations=[],
+                task=None,
+                ui=build_ui_hints("conversation", None),
+            )
+
+        if intent_result.intent == Intent.REMINDER:
+            target_time = parse_reminder_time(request.message_text)
+            task_text = extract_reminder_task(request.message_text)
+            reminder_msg = f"hey! reminder: {task_text}"
+            reminder = db.create_link_reminder({
+                "user_id": request.user_id,
+                "university_id": request.university_id,
+                "target_time": target_time.isoformat(),
+                "message_text": reminder_msg,
+            })
+            # Format time for response
+            time_diff = target_time - datetime.now(timezone.utc)
+            if time_diff.total_seconds() < 3600:
+                time_str = f"{int(time_diff.total_seconds() / 60)} minutes"
+            elif time_diff.total_seconds() < 86400:
+                hours = time_diff.total_seconds() / 3600
+                time_str = f"{int(hours)} hour{'s' if hours > 1 else ''}"
+            else:
+                time_str = target_time.strftime("%B %d at %I:%M %p")
+            reply = f"bet, i'll remind you to {task_text} in {time_str} ⏰"
+            link_orchestrator.insert_link_response(
+                convo["id"],
+                request.university_id,
+                reply,
+                citations=[],
+                cards={},
+                confidence=0.9,
+                session_id=session["id"] if session else None,
+                task_state="answered",
+            )
+            resolve_task_state(convo_state, "resolved", query=request.message_text)
+            return LinkAgentResponse(
+                mode="answered",
+                confidence=0.9,
                 answer_text=reply,
                 citations=[],
                 task=None,
