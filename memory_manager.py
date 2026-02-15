@@ -14,6 +14,10 @@ class MemoryManager:
         """
         Extract facts and save to Vault with tier/priority.
         """
+        # If vault is not initialized, skip memory storage
+        if vault is None:
+            return []
+
         # 1. Extract facts using LLM (with Tiering)
         facts = self._extract_facts(message)
         if not facts:
@@ -46,6 +50,10 @@ class MemoryManager:
 
     def get_decrypted_facts(self, user_id: str, category: Optional[str] = None, tier: Optional[str] = None) -> List[Dict[str, Any]]:
         """Fetch and decrypt facts, returning rich objects with tier/priority."""
+        # If vault is not initialized, return empty
+        if vault is None:
+            return []
+
         encrypted_rows = db.list_encrypted_memories(user_id, category=category)
         
         results = []
