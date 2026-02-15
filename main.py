@@ -57,6 +57,7 @@ from intent_classifier import classify_intent, Intent
 import re as regex_module
 from state_machine import determine_transition
 from vault_service import create_work_order
+from memory_manager import memory_manager
 from logging_config import configure_logging
 
 app = FastAPI(
@@ -418,6 +419,12 @@ async def link_agent(request: LinkAgentRequest):
             sender_type="user",
         )
 
+        # Extract and store facts from the message for long-term memory
+        try:
+            memory_manager.process_message(request.user_id, request.message_text)
+        except Exception:
+            pass  # Don't fail the request if memory extraction fails
+
         user_context = None
         if request.access_token:
             user_context = db.get_user_context_rls(request.access_token, request.user_id)
@@ -429,6 +436,14 @@ async def link_agent(request: LinkAgentRequest):
         user_memory = link_orchestrator.update_user_style_memory(
             request.user_id, resolved_university_id, request.message_text
         )
+        # Load encrypted vault facts and merge into user_memory
+        try:
+            vault_facts = memory_manager.get_decrypted_facts(request.user_id)
+            if vault_facts:
+                user_memory = user_memory or {}
+                user_memory.setdefault("known_preferences", {})["vault_facts"] = vault_facts
+        except Exception:
+            pass
         style_instructions = link_orchestrator.build_style_instructions(user_memory)
         memory_context = db.get_user_memory(request.user_id) or {}
         convo_state = db.get_or_create_link_conversation_state(request.user_id, convo["id"])
