@@ -399,6 +399,7 @@ def generate_small_talk_response(
     text = (message_text or "").strip().lower()
     prefs = (user_memory or {}).get("known_preferences") or {}
     likes = prefs.get("likes") or []
+    like_hint = f"They like: {', '.join(likes)}." if likes else ""
     # Decrypted Vault Facts (Structured)
     vault_list = prefs.get("vault_facts") or []
     long_facts = [f["content"] for f in vault_list if f.get("tier") == "long"]
