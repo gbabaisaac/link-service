@@ -1601,3 +1601,255 @@ def clear_user_vault(user_id: str) -> dict:
         "deleted_events": len(events.data or []),
         "deleted_vibe": bool(vibe.data),
     }
+
+
+# ============ Pattern Detection ============
+
+def create_user_pattern(payload: dict) -> dict:
+    """Save a detected user pattern."""
+    client = get_supabase_client()
+    return client.table("user_patterns").insert(payload).execute().data[0]
+
+
+def get_user_patterns(user_id: str, pattern_type: Optional[str] = None, limit: int = 50) -> list[dict]:
+    """Fetch user patterns, optionally filtered by type."""
+    client = get_supabase_client()
+    query = client.table("user_patterns").select("*").eq("user_id", user_id)
+    if pattern_type:
+        query = query.eq("pattern_type", pattern_type)
+    return query.order("detected_at", desc=True).limit(limit).execute().data
+
+
+def get_latest_user_pattern(user_id: str, pattern_type: str) -> Optional[dict]:
+    """Get the most recent pattern of a specific type for a user."""
+    client = get_supabase_client()
+    result = (
+        client.table("user_patterns")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("pattern_type", pattern_type)
+        .order("detected_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+# ============ Wellness Signals ============
+
+def create_wellness_signal(payload: dict) -> dict:
+    """Record a wellness signal (mood drop, isolation, stress)."""
+    client = get_supabase_client()
+    payload.setdefault("detected_at", datetime.now(timezone.utc).isoformat())
+    payload.setdefault("acknowledged", False)
+    return client.table("wellness_signals").insert(payload).execute().data[0]
+
+
+def get_wellness_signals(user_id: str, acknowledged: Optional[bool] = None, limit: int = 20) -> list[dict]:
+    """Fetch wellness signals for a user."""
+    client = get_supabase_client()
+    query = client.table("wellness_signals").select("*").eq("user_id", user_id)
+    if acknowledged is not None:
+        query = query.eq("acknowledged", acknowledged)
+    return query.order("detected_at", desc=True).limit(limit).execute().data
+
+
+def acknowledge_wellness_signal(signal_id: str) -> dict:
+    """Mark a wellness signal as acknowledged."""
+    client = get_supabase_client()
+    return client.table("wellness_signals").update({"acknowledged": True}).eq("id", signal_id).execute().data[0]
+
+
+# ============ User Connections (Friend Graph) ============
+
+def create_user_connection(payload: dict) -> dict:
+    """Create a connection between two users."""
+    client = get_supabase_client()
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    payload.setdefault("strength", 0.5)
+    return client.table("user_connections").insert(payload).execute().data[0]
+
+
+def get_user_connections(user_id: str, connection_type: Optional[str] = None, limit: int = 100) -> list[dict]:
+    """Get all connections for a user."""
+    client = get_supabase_client()
+    # User can be in either user_a or user_b position
+    query_a = client.table("user_connections").select("*").eq("user_a", user_id)
+    query_b = client.table("user_connections").select("*").eq("user_b", user_id)
+
+    if connection_type:
+        query_a = query_a.eq("connection_type", connection_type)
+        query_b = query_b.eq("connection_type", connection_type)
+
+    results_a = query_a.limit(limit).execute().data or []
+    results_b = query_b.limit(limit).execute().data or []
+
+    return results_a + results_b
+
+
+def update_connection_strength(connection_id: str, strength: float) -> dict:
+    """Update the strength of a connection."""
+    client = get_supabase_client()
+    payload = {
+        "strength": strength,
+        "last_interaction": datetime.now(timezone.utc).isoformat()
+    }
+    return client.table("user_connections").update(payload).eq("id", connection_id).execute().data[0]
+
+
+def get_connection_between(user_a: str, user_b: str) -> Optional[dict]:
+    """Get the connection between two specific users."""
+    client = get_supabase_client()
+    # Check both orderings
+    result = client.table("user_connections").select("*").eq("user_a", user_a).eq("user_b", user_b).maybe_single().execute()
+    if result.data:
+        return result.data
+    result = client.table("user_connections").select("*").eq("user_a", user_b).eq("user_b", user_a).maybe_single().execute()
+    return result.data if result.data else None
+
+
+# ============ Active Users for Pattern Scans ============
+
+def get_active_user_ids(since_days: int = 7, limit: int = 1000) -> list[str]:
+    """Get user IDs who have been active recently."""
+    client = get_supabase_client()
+    since = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
+    result = (
+        client.table("link_user_sessions")
+        .select("user_id")
+        .gte("last_active_at", since)
+        .limit(limit)
+        .execute()
+    )
+    return list(set(r["user_id"] for r in result.data if r.get("user_id")))
+
+
+# ============ Four-Tier Memory System ============
+
+def create_tiered_memory(payload: dict) -> dict:
+    """Create a memory entry in the tiered memory system."""
+    client = get_supabase_client()
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    return client.table("link_tiered_memory").insert(payload).execute().data[0]
+
+
+def create_lifetime_memory(payload: dict) -> dict:
+    """Create a permanent lifetime memory entry."""
+    client = get_supabase_client()
+    payload["tier"] = "lifetime"
+    payload["never_forget"] = True
+    payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    return client.table("link_lifetime_memory").insert(payload).execute().data[0]
+
+
+def get_tiered_memories(
+    user_id: str,
+    tier: Optional[str] = None,
+    categories: Optional[list[str]] = None,
+    time_range: Optional[tuple] = None,
+    limit: int = 50
+) -> list[dict]:
+    """Fetch tiered memories with optional filters."""
+    client = get_supabase_client()
+    query = client.table("link_tiered_memory").select("*").eq("user_id", user_id)
+
+    if tier:
+        query = query.eq("tier", tier)
+
+    if categories:
+        query = query.in_("category", categories)
+
+    if time_range:
+        start, end = time_range
+        if start:
+            query = query.gte("created_at", start.isoformat() if hasattr(start, 'isoformat') else start)
+        if end:
+            query = query.lte("created_at", end.isoformat() if hasattr(end, 'isoformat') else end)
+
+    return query.order("importance", desc=True).limit(limit).execute().data
+
+
+def get_lifetime_memories(user_id: str, limit: int = 100) -> list[dict]:
+    """Get all lifetime (permanent) memories for a user."""
+    client = get_supabase_client()
+    return (
+        client.table("link_lifetime_memory")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("importance", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+
+def update_tiered_memory(memory_id: str, payload: dict) -> dict:
+    """Update a tiered memory entry."""
+    client = get_supabase_client()
+    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return client.table("link_tiered_memory").update(payload).eq("id", memory_id).execute().data[0]
+
+
+def delete_tiered_memory(memory_id: str) -> bool:
+    """Delete a tiered memory entry."""
+    client = get_supabase_client()
+    result = client.table("link_tiered_memory").delete().eq("id", memory_id).execute()
+    return bool(result.data)
+
+
+def delete_lifetime_memory(memory_id: str) -> bool:
+    """Delete a lifetime memory entry (user-requested only)."""
+    client = get_supabase_client()
+    result = client.table("link_lifetime_memory").delete().eq("id", memory_id).execute()
+    return bool(result.data)
+
+
+def search_memories(user_id: str, query: str, limit: int = 20) -> list[dict]:
+    """Full-text search across all memory tiers."""
+    client = get_supabase_client()
+
+    # Search in tiered memory
+    tiered_results = (
+        client.table("link_tiered_memory")
+        .select("*")
+        .eq("user_id", user_id)
+        .ilike("content", f"%{query}%")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+    # Search in lifetime memory
+    lifetime_results = (
+        client.table("link_lifetime_memory")
+        .select("*")
+        .eq("user_id", user_id)
+        .ilike("content", f"%{query}%")
+        .limit(limit)
+        .execute()
+        .data
+    )
+
+    # Combine and sort by importance
+    all_results = tiered_results + lifetime_results
+    all_results.sort(key=lambda x: x.get("importance", 0), reverse=True)
+
+    return all_results[:limit]
+
+
+def get_memory_stats(user_id: str) -> dict:
+    """Get memory usage statistics for a user."""
+    client = get_supabase_client()
+
+    # Count by tier
+    short_term = client.table("link_tiered_memory").select("id", count="exact").eq("user_id", user_id).eq("tier", "short_term").execute()
+    medium_term = client.table("link_tiered_memory").select("id", count="exact").eq("user_id", user_id).eq("tier", "medium_term").execute()
+    long_term = client.table("link_tiered_memory").select("id", count="exact").eq("user_id", user_id).eq("tier", "long_term").execute()
+    lifetime = client.table("link_lifetime_memory").select("id", count="exact").eq("user_id", user_id).execute()
+
+    return {
+        "short_term_count": short_term.count or 0,
+        "medium_term_count": medium_term.count or 0,
+        "long_term_count": long_term.count or 0,
+        "lifetime_count": lifetime.count or 0,
+    }

@@ -86,6 +86,10 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
     if any(x in text for x in ["how are you", "how's your day", "what's good", "wyd", "hru"]):
         return IntentResult(Intent.SMALL_TALK, entities, raw)
 
+    # Check for REMINDER early - before domain-specific intents that might match keywords in reminder text
+    if any(x in text for x in ["remind me", "set a reminder", "reminder for", "remind me to", "don't let me forget", "alert me"]):
+        return IntentResult(Intent.REMINDER, entities, raw)
+
     if any(x in text for x in ["who am i", "what do you know about me", "do you know me", "tell me about myself"]):
         return IntentResult(Intent.PROFILE_QUESTION, entities, raw)
     if any(
@@ -140,9 +144,6 @@ def classify_intent(message_text: str, active_task: Optional[dict] = None) -> In
         return IntentResult(Intent.SOCIAL, entities, raw)
     if any(x in text for x in ["buy", "sell", "market", "textbook", "bike", "sublet"]):
         return IntentResult(Intent.MARKETPLACE, entities, raw)
-
-    if any(x in text for x in ["remind me", "set a reminder", "reminder for", "remind me to", "don't let me forget", "alert me"]):
-        return IntentResult(Intent.REMINDER, entities, raw)
 
     # If user is responding while an active task exists, treat as followup.
     if active_task:

@@ -262,16 +262,30 @@ def parse_reminder_time(text: str) -> Optional[datetime]:
 def extract_reminder_task(text: str) -> str:
     """Extract what the user wants to be reminded about."""
     text = text.lower()
-    # Remove common prefixes
-    for prefix in ["remind me to", "remind me about", "remind me", "set a reminder to", "set a reminder for", "don't let me forget to", "alert me to"]:
-        if prefix in text:
-            text = text.split(prefix, 1)[1]
+    # Remove common prefixes using regex with word boundaries (ordered from most specific to least specific)
+    prefixes = [
+        r"remind me to\b",
+        r"remind me about\b",
+        r"remind me\b",
+        r"set a reminder to\b",
+        r"set a reminder for\b",
+        r"don't let me forget to\b",
+        r"alert me to\b"
+    ]
+    for prefix in prefixes:
+        match = regex_module.search(prefix, text)
+        if match:
+            text = text[match.end():]
             break
     # Remove time expressions
-    text = regex_module.sub(r"in\s+\d+\s*(hour|hr|minute|min)s?", "", text)
-    text = regex_module.sub(r"tomorrow(\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm)?)?", "", text)
-    text = regex_module.sub(r"at\s+\d{1,2}(:\d{2})?\s*(am|pm)?", "", text)
-    text = regex_module.sub(r"in a bit|later|soon", "", text)
+    text = regex_module.sub(r"\btomorrow(\s+at\s+\d{1,2}(:\d{2})?\s*(am|pm)?)?\b", "", text)
+    text = regex_module.sub(r"\bin\s+\d+\s*(hour|hr|minute|min)s?\b", "", text)
+    text = regex_module.sub(r"\bat\s+\d{1,2}(:\d{2})?\s*(am|pm)?\b", "", text)
+    text = regex_module.sub(r"\b(in a bit|later|soon)\b", "", text)
+    # Clean up: strip whitespace and remove leading "to " if present
+    text = text.strip()
+    if text.startswith("to "):
+        text = text[3:]
     return text.strip() or "your reminder"
 
 
